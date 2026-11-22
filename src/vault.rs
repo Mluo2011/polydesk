@@ -1,8 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
+use alloy::signers::local::coins_bip39::{English, Mnemonic};
+use alloy::signers::local::{MnemonicBuilder, PrivateKeySigner};
 use anyhow::{Context, Result, anyhow};
 use argon2::Argon2;
 use base64::Engine as _;
@@ -28,9 +31,20 @@ impl Default for WalletSignatureType {
     }
 }
 
+/// Newly generated (or user-revealed) local BIP-39 wallet details.
+/// Generated 100% locally via OS CSPRNG; never transmitted to any server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeneratedWallet {
+    pub address: String,
+    pub private_key: String,
+    pub mnemonic: Option<String>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VaultSecret {
     pub private_key: String,
+    #[serde(default)]
+    pub mnemonic: Option<String>,
     pub funder: Option<String>,
     pub signature_type: WalletSignatureType,
     pub label: Option<String>,
@@ -39,7 +53,55 @@ pub struct VaultSecret {
 impl Drop for VaultSecret {
     fn drop(&mut self) {
         self.private_key.zeroize();
+        if let Some(ref mut m) = self.mnemonic {
+            m.zeroize();
+        }
     }
+}
+
+/// Generate a brand-new random local Ethereum/Polygon wallet on-device using OS CSPRNG:
+/// - Standard 12-word BIP-39 English Secret Recovery Phrase
+/// - Standard MetaMask/Rabby BIP-44 derivation (`m/44'/60'/0'/0/0`)
+/// - 66-character `0x...` hex private key & `0x...` Polygon address
+pub fn generate_local_wallet() -> Result<GeneratedWallet> {
+    let mut rng = rand::rngs::OsRng;
+    let mnemonic = Mnemonic::<English>::new_with_count(&mut rng, 12)
+        .map_err(|e| anyhow!("Failed generating 12-word BIP-39 mnemonic: {e}"))?;
+    let phrase = mnemonic.to_phrase();
+    let signer = MnemonicBuilder::<English>::default()
+        .phrase(phrase.as_str())
+        .build()
+        .map_err(|e| anyhow!("Failed deriving wallet from mnemonic: {e}"))?;
+    let address = format!("{:#x}", signer.address());
+    let private_key = format!("0x{}", hex::encode(signer.to_bytes()));
+    Ok(GeneratedWallet {
+        address,
+        private_key,
+        mnemonic: Some(phrase),
+    })
+}
+
+/// Parse user input as EITHER a `0x...` hex private key OR a 12/24-word BIP-39 secret phrase.
+/// Returns `(normalized_0x_private_key, optional_mnemonic_phrase)`.
+pub fn parse_key_or_mnemonic(raw: &str) -> Result<(String, Option<String>)> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("Enter a private key (0x...) or a 12/24-word secret phrase"));
+    }
+    let words: Vec<&str> = trimmed.split_whitespace().collect();
+    if words.len() >= 12 {
+        let normalized_phrase = words.join(" ");
+        let signer = MnemonicBuilder::<English>::default()
+            .phrase(normalized_phrase.as_str())
+            .build()
+            .map_err(|e| anyhow!("Invalid BIP-39 secret recovery phrase: {e}"))?;
+        let pk = format!("0x{}", hex::encode(signer.to_bytes()));
+        return Ok((pk, Some(normalized_phrase)));
+    }
+    let signer = PrivateKeySigner::from_str(trimmed)
+        .context("Invalid Polygon private key hex (expected 64 hex chars / 0x..., or a 12-word secret phrase)")?;
+    let pk = format!("0x{}", hex::encode(signer.to_bytes()));
+    Ok((pk, None))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,8 +178,8 @@ pub fn save_encrypted_vault(
 
     let mut salt = [0u8; 16];
     let mut nonce_bytes = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut salt);
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    rand::rngs::OsRng.fill_bytes(&mut salt);
+    rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
 
     let mut key = derive_key(password, &salt)?;
     let cipher = Aes256Gcm::new_from_slice(&key)
@@ -195,6 +257,7 @@ mod tests {
 
         let secret = VaultSecret {
             private_key: "0x1111111111111111111111111111111111111111111111111111111111111111".into(),
+            mnemonic: Some("test phrase words".into()),
             funder: Some("0x2222222222222222222222222222222222222222".into()),
             signature_type: WalletSignatureType::GnosisSafe,
             label: Some("test".into()),
@@ -203,13 +266,32 @@ mod tests {
         save_encrypted_vault(&path, "super-secret-pass", &secret, "0x1234...5678").unwrap();
         let raw = fs::read_to_string(&path).unwrap();
         assert!(!raw.contains("1111111111111111"));
+        assert!(!raw.contains("test phrase words"));
 
         let unlocked = load_encrypted_vault(&path, "super-secret-pass").unwrap();
         assert_eq!(unlocked.private_key, secret.private_key);
+        assert_eq!(unlocked.mnemonic, secret.mnemonic);
         assert_eq!(unlocked.signature_type, WalletSignatureType::GnosisSafe);
 
         assert!(load_encrypted_vault(&path, "wrong-password").is_err());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn generate_wallet_and_rederive_from_mnemonic() {
+        let w = generate_local_wallet().unwrap();
+        assert!(w.address.starts_with("0x") && w.address.len() == 42);
+        assert!(w.private_key.starts_with("0x") && w.private_key.len() == 66);
+        let phrase = w.mnemonic.as_deref().unwrap();
+        assert_eq!(phrase.split_whitespace().count(), 12);
+
+        let (pk_from_phrase, m) = parse_key_or_mnemonic(phrase).unwrap();
+        assert_eq!(pk_from_phrase, w.private_key);
+        assert_eq!(m.as_deref(), Some(phrase));
+
+        let (pk_direct, m2) = parse_key_or_mnemonic(&w.private_key).unwrap();
+        assert_eq!(pk_direct, w.private_key);
+        assert!(m2.is_none());
     }
 }

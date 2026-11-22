@@ -130,57 +130,48 @@
   </div>
 
   <div class="card">
-    <h2>4. 连接自己的实盘钱包（如何解锁 LIVE）</h2>
-    <p>点击右上角 <strong><code>钱包 / 充值</code></strong>，找到 <strong>「实盘本地加密钱包」</strong>，按你平时登录 Polymarket 的方式选择对应类型：</p>
+    <h2>4. 生成本地新钱包 或 导入已有私钥（如何解锁 LIVE）</h2>
+    <p>点击右上角 <strong><code>钱包 / 充值</code></strong>，找到 <strong>「实盘本地加密钱包」</strong>，有两种方式：</p>
 
-    <h3>情况 A：你用邮箱 / Google 账号登录 Polymarket 官网</h3>
+    <h3>方式 1（最简单推荐）：一键生成随机本地钱包</h3>
     <ol>
-      <li>前往 Polymarket 官网 <strong>Settings → Account → Export Private Key</strong>，复制 <code>0x</code> 开头的 <strong>66 位私钥</strong>（注意：不是 12 个助记词，也不是公开钱包地址）。</li>
-      <li>在 Polymarket 官网 <strong>Portfolio / 个人主页</strong>复制你的 <strong>42 位代理/充值地址</strong>（<code>0x...</code>）。</li>
-      <li>在 PolyDesk 中填写：
-        <ul>
-          <li><strong>钱包类型：</strong><code>Polymarket Proxy Wallet</code></li>
-          <li><strong>Polygon 私钥：</strong>粘贴 66 位私钥</li>
-          <li><strong>代理地址：</strong>粘贴 42 位 Polymarket 个人/充值地址</li>
-          <li><strong>本地加密密码：</strong>自己随便设一个 ≥6 位密码（用于加密保存本机文件）</li>
-        </ul>
-      </li>
-      <li>点击 <strong><code>解锁并进入实盘</code></strong>，左上角变为绿色 <span class="tag tag-g">实盘</span> 即成功。</li>
+      <li>在 <strong>「一键生成随机本地钱包」</strong> 标签下，设一个 ≥6 位本机加密密码，点击 <strong><code>生成随机本地钱包</code></strong>。</li>
+      <li>软件会在你电脑本地随机生成全新的 <strong>Polygon 钱包地址</strong>、<strong>12 词助记词（BIP-39）</strong> 和 <strong>私钥（0x...）</strong>，并自动生成专属 <strong>USDT / USDC 直充地址</strong>。</li>
+      <li>请立即离线抄写保存 12 词助记词和私钥（你随时可以把这 12 词导入 MetaMask / Rabby 提现）。</li>
     </ol>
 
-    <h3>情况 B：你用 MetaMask（小狐狸）/ Rabby 钱包登录 Polymarket 官网</h3>
+    <h3>方式 2：导入已有私钥 / 12 词助记词</h3>
     <ul>
-      <li><strong>钱包类型：</strong>选 <code>Polymarket Gnosis Safe</code></li>
-      <li><strong>Polygon 私钥：</strong>在 MetaMask / Rabby「账户详情 → 显示私钥」中复制 66 位私钥</li>
-      <li><strong>代理地址：</strong>粘贴你在 Polymarket 官网的 42 位个人/充值地址</li>
-      <li>设好本机加密密码后点击 <strong><code>解锁并进入实盘</code></strong>。</li>
-    </ul>
-
-    <h3>情况 C：全新独立热钱包测试（最简单安全）</h3>
-    <ul>
-      <li>在 MetaMask / Rabby 新建一个专门用于交易的小额钱包，复制 66 位私钥。</li>
-      <li><strong>钱包类型：</strong>选 <code>EOA (MetaMask / Rabby / Private Key)</code>，<strong>代理地址留空</strong>，设好本机加密密码后点击 <strong><code>解锁并进入实盘</code></strong>。</li>
+      <li><strong>邮箱 / Google 登录 Polymarket 官网：</strong>选 <code>Polymarket Proxy Wallet</code>，粘贴 66 位私钥（官网 Settings → Account → Export Private Key）和 42 位官网代理/充值地址。</li>
+      <li><strong>MetaMask / Rabby 登录 Polymarket 官网：</strong>选 <code>Polymarket Gnosis Safe</code>，粘贴 66 位私钥（或 12 词助记词）和 42 位官网代理地址。</li>
+      <li><strong>独立热钱包（EOA）：</strong>选 <code>EOA</code>，直接粘贴 66 位私钥或 12 词助记词，代理地址留空即可。</li>
     </ul>
 
     <div class="banner banner-amber">
-      <strong>安全提示：</strong>切勿导入存放大额资产的冷钱包/主钱包私钥；请使用专门的小额交易热钱包，也绝不要把私钥发给任何人。Polymarket 实盘要求年满 18 周岁且不在受限地区。
+      <strong>安全提示：</strong>切勿导入存放大额资产的冷钱包/主钱包私钥；请使用专门的小额交易热钱包，也绝不要把助记词或私钥发给任何人。Polymarket 实盘要求年满 18 周岁且不在受限地区。
     </div>
   </div>
 
   <div class="card">
-    <h2>5. 如何充值真实资金 &amp; 如何提现</h2>
-    <h3>充值（软件内直接生成官方地址）</h3>
+    <h2>5. 如何直接转入 USDT / USDC 充值 &amp; 如何提现</h2>
+    <h3>直接转入 USDT / USDC 充值（软件内自动生成官方跨链桥地址）</h3>
     <ol>
-      <li>打开 <strong><code>钱包 / 充值</code></strong>，下滑到 <strong>「充值真实资金 (Polymarket 官方跨链桥)」</strong>。</li>
-      <li>确认你的钱包/代理地址已填入，点击 <strong><code>获取充值地址</code></strong>。</li>
-      <li>向显示的专属官方跨链桥地址转入 <strong>USDC</strong>（支持 Polygon / Arbitrum / Base / 以太坊 / Solana，最低约 $3）或 <strong>BTC</strong>，Polymarket 会自动 1:1 转为 Polygon <code>pUSD</code> 交易保证金（通常 10–60 秒到账）。</li>
-      <li>到账后点击 <strong><code>刷新余额与授权</code></strong> 即可开始实盘交易。</li>
+      <li>打开 <strong><code>钱包 / 充值</code></strong>，下滑到 <strong>「直接转入 USDT / USDC 充值 (Polymarket 官方跨链桥)」</strong>（新建钱包后已自动生成；导入钱包后点 <strong><code>获取 USDT/USDC 充值地址</code></strong>）。</li>
+      <li>直接从币安 / 欧易 OKX / Bybit / Coinbase / MetaMask / Phantom 向对应专属地址转入 <strong>USDT 或 USDC</strong>：
+        <ul>
+          <li><strong>EVM 地址（0x...）：</strong>支持 Polygon / BNB Chain (BSC) / Base / Arbitrum / Optimism / 以太坊的 <strong>USDT / USDC</strong>（最低 $2–$3）</li>
+          <li><strong>波场 Tron TRC-20 地址（T...）：</strong>支持 <strong>TRC-20 USDT</strong>（最低 $2）</li>
+          <li><strong>Solana 地址：</strong>支持 <strong>USDT / USDC / SOL</strong>（最低 $2）</li>
+          <li><strong>Bitcoin 地址：</strong>支持 <strong>BTC</strong>（最低约 $3.6）</li>
+        </ul>
+      </li>
+      <li>等待 10–60 秒，Polymarket 会自动 1:1 转为 Polygon <code>pUSD</code> 到账你的本地钱包，点击 <strong><code>刷新余额与授权</code></strong> 即可开始实盘交易。</li>
     </ol>
     <h3>提现</h3>
     <ul>
-      <li>你的资金始终在链上自己的钱包/代理合约里，不由软件托管。</li>
-      <li><strong>Proxy / Gnosis Safe 账户：</strong>直接打开 <code>polymarket.com/portfolio</code> 点击 <strong>Withdraw</strong> 提币到交易所或个人钱包即可。</li>
-      <li><strong>独立 EOA 钱包：</strong>在 MetaMask / Rabby 中直接转出或将 <code>pUSD</code> 1:1 赎回/兑换为 <code>USDC</code> 转到交易所变现。</li>
+      <li>你的资金始终在链上自己的钱包里，不由软件托管。</li>
+      <li><strong>本地生成的新钱包 / 独立 EOA：</strong>随时可将 12 词助记词或私钥导入 MetaMask / Rabby 钱包提币到交易所变现。</li>
+      <li><strong>Proxy / Gnosis Safe 账户：</strong>直接打开 <code>polymarket.com/portfolio</code> 点击 <strong>Withdraw</strong> 提币即可。</li>
     </ul>
   </div>
 

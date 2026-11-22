@@ -33,8 +33,9 @@ use crate::market::{MarketClient, SiblingOutcome};
 use crate::paper::{PaperEngine, PaperFill, PaperOrder, PaperOrderParams, PaperPosition, PaperStateSnapshot};
 use crate::telemetry::{BuilderFeeRecord, Telemetry};
 use crate::vault::{
-    VaultMetadata, VaultSecret, WalletSignatureType, default_vault_path, delete_vault,
-    load_encrypted_vault, save_encrypted_vault, vault_metadata,
+    GeneratedWallet, VaultMetadata, VaultSecret, WalletSignatureType, default_vault_path,
+    delete_vault, generate_local_wallet, load_encrypted_vault, parse_key_or_mnemonic,
+    save_encrypted_vault, vault_metadata,
 };
 use crate::ws_feed::MarketFeed;
 
@@ -97,6 +98,8 @@ pub struct OrderAck {
 pub struct DepositAddressesInfo {
     pub target_wallet: String,
     pub evm_address: String,
+    #[serde(default)]
+    pub tron_address: Option<String>,
     pub solana_address: String,
     pub btc_address: String,
     pub note: Option<String>,
@@ -386,15 +389,67 @@ impl ExecutionEngine {
         }
     }
 
+    /// Generate a brand-new random local BIP-39 wallet (12-word secret phrase + private key + Polygon address)
+    /// completely on-device, encrypt it into the local vault, unlock Polymarket CLOB V2,
+    /// and immediately fetch direct USDT/USDC Polymarket Bridge deposit addresses for it.
+    pub async fn create_and_unlock_new_wallet(
+        &self,
+        password: String,
+        persist_vault: bool,
+    ) -> Result<(GeneratedWallet, AccountState, Option<DepositAddressesInfo>)> {
+        if persist_vault && password.len() < 6 {
+            return Err(anyhow!("Vault passphrase must be at least 6 characters"));
+        }
+        let generated = generate_local_wallet()?;
+        let signer = PrivateKeySigner::from_str(&generated.private_key)
+            .context("Generated private key invalid")?
+            .with_chain_id(Some(POLYGON));
+
+        if persist_vault {
+            let hint = format!(
+                "{}...{}",
+                &generated.address[..6],
+                &generated.address[generated.address.len() - 4..]
+            );
+            let secret = VaultSecret {
+                private_key: generated.private_key.clone(),
+                mnemonic: generated.mnemonic.clone(),
+                funder: None,
+                signature_type: WalletSignatureType::Eoa,
+                label: Some("Local Generated".into()),
+            };
+            save_encrypted_vault(&self.vault_path, &password, &secret, &hint)?;
+        }
+
+        self.authenticate_live(signer, None, WalletSignatureType::Eoa)
+            .await?;
+        let deposit = self.fetch_deposit_addresses(&generated.address).await.ok();
+        let acc = self.account_state().await;
+        Ok((generated, acc, deposit))
+    }
+
+    /// Decrypt the local encrypted vault (requiring user's vault passphrase) so they can
+    /// re-view / back up their on-device private key & 12-word secret phrase offline.
+    pub fn reveal_vault_backup(&self, password: &str) -> Result<GeneratedWallet> {
+        let secret = load_encrypted_vault(&self.vault_path, password)?;
+        let signer = PrivateKeySigner::from_str(secret.private_key.trim())
+            .context("Vault contains invalid private key")?;
+        Ok(GeneratedWallet {
+            address: format!("{:#x}", signer.address()),
+            private_key: secret.private_key.clone(),
+            mnemonic: secret.mnemonic.clone(),
+        })
+    }
+
     pub async fn save_and_unlock_wallet(
         &self,
-        private_key: String,
+        private_key_or_phrase: String,
         funder: Option<String>,
         signature_type: WalletSignatureType,
         password: String,
         persist_vault: bool,
     ) -> Result<AccountState> {
-        let pk_clean = private_key.trim().to_string();
+        let (pk_clean, mnemonic_opt) = parse_key_or_mnemonic(&private_key_or_phrase)?;
         let signer = PrivateKeySigner::from_str(&pk_clean)
             .context("Invalid Polygon private key hex")?
             .with_chain_id(Some(POLYGON));
@@ -412,6 +467,7 @@ impl ExecutionEngine {
             );
             let secret = VaultSecret {
                 private_key: pk_clean.clone(),
+                mnemonic: mnemonic_opt,
                 funder: funder_clean.clone(),
                 signature_type,
                 label: Some("Primary".into()),
@@ -1235,11 +1291,47 @@ impl ExecutionEngine {
         Ok(count)
     }
 
-    /// Fetch official Polymarket Bridge deposit addresses (EVM/Polygon/Arbitrum/Base, Solana, BTC)
-    /// that automatically wrap/bridge deposited USDC/crypto into Polygon pUSD for `wallet_addr`.
+    /// Fetch official Polymarket Bridge deposit addresses (EVM USDT/USDC, Tron TRC-20 USDT, Solana, BTC)
+    /// that automatically convert deposited USDT / USDC / crypto 1:1 into Polygon pUSD for `wallet_addr`.
     pub async fn fetch_deposit_addresses(&self, wallet_addr: &str) -> Result<DepositAddressesInfo> {
         let addr = Address::from_str(wallet_addr.trim())
             .context("Invalid Polygon wallet address (expected 0x...)")?;
+        let target_hex = format!("{addr:#x}");
+
+        // Query Polymarket Bridge directly with X-Builder-Code so we receive ALL chains including Tron TRC-20 USDT!
+        if let Ok(resp) = self
+            .market_client
+            .http()
+            .post("https://bridge.polymarket.com/deposit")
+            .header("X-Builder-Code", HARDCODED_BUILDER_CODE)
+            .json(&serde_json::json!({ "address": &target_hex }))
+            .send()
+            .await
+            && resp.status().is_success()
+            && let Ok(val) = resp.json::<serde_json::Value>().await
+            && let Some(a) = val.get("address")
+        {
+            let evm = a.get("evm").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let svm = a.get("svm").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let btc = a.get("btc").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let tron = a
+                .get("tron")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            if !evm.is_empty() {
+                return Ok(DepositAddressesInfo {
+                    target_wallet: target_hex,
+                    evm_address: evm,
+                    tron_address: tron,
+                    solana_address: svm,
+                    btc_address: btc,
+                    note: val.get("note").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                });
+            }
+        }
+
+        // Fallback to official SDK BridgeClient
         let client = BridgeClient::default();
         let req = DepositRequest::builder().address(addr).build();
         let resp = client
@@ -1247,8 +1339,9 @@ impl ExecutionEngine {
             .await
             .context("Polymarket Bridge deposit address request failed")?;
         Ok(DepositAddressesInfo {
-            target_wallet: format!("{addr:#x}"),
+            target_wallet: target_hex,
             evm_address: format!("{:#x}", resp.address.evm),
+            tron_address: None,
             solana_address: resp.address.svm,
             btc_address: resp.address.btc,
             note: resp.note,

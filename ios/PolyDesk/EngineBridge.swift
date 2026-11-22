@@ -137,12 +137,25 @@ struct CopyTargetItem: Codable, Identifiable {
     let copied_count: UInt32
 }
 
+struct GeneratedWalletInfo: Codable {
+    let address: String
+    let private_key: String
+    let mnemonic: String?
+}
+
 struct DepositInfo: Codable {
     let target_wallet: String
     let evm_address: String
+    let tron_address: String?
     let solana_address: String
     let btc_address: String
     let note: String?
+}
+
+private struct WalletCreatePayload: Decodable {
+    let wallet: GeneratedWalletInfo
+    let account: AccountSnap
+    let deposit: DepositInfo?
 }
 
 struct GreenUpInfo: Codable {
@@ -232,6 +245,7 @@ final class EngineBridge: ObservableObject {
     @Published var greenUp: GreenUpInfo?
     @Published var whales: WhaleSummary?
     @Published var depositInfo: DepositInfo?
+    @Published var revealedWallet: GeneratedWalletInfo?
     @Published var toast: String?
 
     @Published var orderType: String = "GTC"
@@ -456,6 +470,34 @@ final class EngineBridge: ObservableObject {
     func resetPaper(_ bal: Double) {
         call(["op": "reset_paper", "balance": bal], as: AccountSnap.self) { [weak self] res in
             if case .success(let acc) = res { self?.account = acc; self?.showToast("Paper balance reset") }
+        }
+    }
+
+    func createNewWallet(password: String) {
+        let req: [String: Any] = [
+            "op": "wallet_create",
+            "password": password,
+            "persist_vault": true,
+        ]
+        call(req, as: WalletCreatePayload.self) { [weak self] res in
+            switch res {
+            case .success(let p):
+                self?.revealedWallet = p.wallet
+                self?.account = p.account
+                if let dep = p.deposit { self?.depositInfo = dep }
+                self?.showToast(self?.t("Created new local wallet!", "已生成本地新钱包！") ?? "")
+            case .failure(let e):
+                self?.showToast(e.localizedDescription)
+            }
+        }
+    }
+
+    func revealBackup(password: String) {
+        call(["op": "wallet_reveal", "password": password], as: GeneratedWalletInfo.self) { [weak self] res in
+            switch res {
+            case .success(let w): self?.revealedWallet = w
+            case .failure(let e): self?.showToast(e.localizedDescription)
+            }
         }
     }
 

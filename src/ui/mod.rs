@@ -26,7 +26,7 @@ use polydesk::market::{EventSiblings, MarketSummary, PricePoint, WhaleFlowSummar
 use polydesk::odds::{OddsFormat, format_odds, format_size, format_usd};
 use polydesk::paper::{PaperOrder, PaperPosition};
 use polydesk::updater::{UpdateStatus, check_github_release, download_and_apply_update};
-use polydesk::vault::WalletSignatureType;
+use polydesk::vault::{GeneratedWallet, WalletSignatureType};
 
 use self::chart::{ChartMode, IndicatorConfig, draw_price_chart};
 use self::ladder::{LadderAction, LadderState, draw_price_ladder};
@@ -35,6 +35,12 @@ use self::ladder::{LadderAction, LadderState, draw_price_ladder};
 pub enum ActiveModal {
     WalletAndDeposit,
     SettingsAndUpdates,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalletSetupTab {
+    CreateNew,
+    ImportExisting,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +76,12 @@ pub enum UiMsg {
     SiblingsLoaded(String, EventSiblings),
     TranslationsReady,
     AccountUpdated(AccountState),
+    WalletCreated {
+        wallet: GeneratedWallet,
+        account: AccountState,
+        deposit: Option<DepositAddressesInfo>,
+    },
+    WalletRevealed(GeneratedWallet),
     DepositLoaded(DepositAddressesInfo),
     UpdateChecked(UpdateStatus),
     Toast { text: String, is_err: bool },
@@ -131,10 +143,13 @@ pub struct PolyDeskDesktop {
     copy_max_usd: f64,
 
     pub(crate) paper_reset_input: String,
+    pub(crate) wallet_setup_tab: WalletSetupTab,
     pub(crate) wallet_sig_type: WalletSignatureType,
     pub(crate) wallet_pk_input: String,
     pub(crate) wallet_funder_input: String,
     pub(crate) vault_pass_input: String,
+    pub(crate) reveal_pass_input: String,
+    pub(crate) revealed_wallet: Option<GeneratedWallet>,
     pub(crate) wallet_persist_vault: bool,
     pub(crate) deposit_wallet_input: String,
     pub(crate) github_repo_input: String,
@@ -200,10 +215,13 @@ impl PolyDeskDesktop {
             copy_mult: 0.1,
             copy_max_usd: 25.0,
             paper_reset_input: "1000".into(),
+            wallet_setup_tab: WalletSetupTab::CreateNew,
             wallet_sig_type: WalletSignatureType::Eoa,
             wallet_pk_input: String::new(),
             wallet_funder_input: String::new(),
             vault_pass_input: String::new(),
+            reveal_pass_input: String::new(),
+            revealed_wallet: None,
             wallet_persist_vault: true,
             deposit_wallet_input: String::new(),
             github_repo_input: cfg.github_repo.clone(),
@@ -536,6 +554,43 @@ impl PolyDeskDesktop {
         });
     }
 
+    pub(crate) fn trigger_create_new_wallet(&self) {
+        let core = self.core.clone();
+        let tx = self.tx.clone();
+        let pass = self.vault_pass_input.clone();
+        let persist = self.wallet_persist_vault;
+        self.rt.spawn(async move {
+            match core.execution.create_and_unlock_new_wallet(pass, persist).await {
+                Ok((wallet, account, deposit)) => {
+                    let _ = tx.send(UiMsg::WalletCreated { wallet, account, deposit });
+                    let _ = tx.send(UiMsg::Toast {
+                        text: "Created new local wallet & fetched USDT/USDC deposit addresses!".into(),
+                        is_err: false,
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(UiMsg::Toast { text: e.to_string(), is_err: true });
+                }
+            }
+        });
+    }
+
+    pub(crate) fn trigger_reveal_backup(&self) {
+        let core = self.core.clone();
+        let tx = self.tx.clone();
+        let pass = self.reveal_pass_input.clone();
+        self.rt.spawn(async move {
+            match core.execution.reveal_vault_backup(&pass) {
+                Ok(w) => {
+                    let _ = tx.send(UiMsg::WalletRevealed(w));
+                }
+                Err(e) => {
+                    let _ = tx.send(UiMsg::Toast { text: e.to_string(), is_err: true });
+                }
+            }
+        });
+    }
+
     pub(crate) fn trigger_connect_wallet(&self) {
         let core = self.core.clone();
         let tx = self.tx.clone();
@@ -673,6 +728,19 @@ impl PolyDeskDesktop {
                 }
                 UiMsg::TranslationsReady => {}
                 UiMsg::AccountUpdated(acc) => { self.account = acc; }
+                UiMsg::WalletCreated { wallet, account, deposit } => {
+                    self.deposit_wallet_input = wallet.address.clone();
+                    self.revealed_wallet = Some(wallet);
+                    self.account = account;
+                    if let Some(dep) = deposit {
+                        self.deposit_info = Some(dep);
+                    }
+                    self.vault_pass_input.clear();
+                }
+                UiMsg::WalletRevealed(w) => {
+                    self.revealed_wallet = Some(w);
+                    self.reveal_pass_input.clear();
+                }
                 UiMsg::DepositLoaded(dep) => { self.deposit_info = Some(dep); }
                 UiMsg::UpdateChecked(st) => { self.update_status = Some(st); }
                 UiMsg::Toast { text, is_err } => { self.push_toast(text, is_err); }

@@ -75,6 +75,8 @@ enum FfiRequest {
     RemoveCopy { id: String },
     ResetPaper { balance: f64 },
     SetMode { mode: TradingMode },
+    WalletCreate { password: String, persist_vault: bool },
+    WalletReveal { password: String },
     WalletConnect {
         private_key: String,
         funder: Option<String>,
@@ -245,6 +247,28 @@ fn handle_call(raw: *const c_char) -> Result<Value, String> {
             FfiRequest::SetMode { mode } => {
                 c.execution.set_mode(mode).map_err(|e| e.to_string())?;
                 Ok(json!(c.execution.account_state().await))
+            }
+            FfiRequest::WalletCreate {
+                password,
+                persist_vault,
+            } => {
+                let (wallet, account, deposit) = c
+                    .execution
+                    .create_and_unlock_new_wallet(password, persist_vault)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(json!({
+                    "wallet": wallet,
+                    "account": account,
+                    "deposit": deposit,
+                }))
+            }
+            FfiRequest::WalletReveal { password } => {
+                let wallet = c
+                    .execution
+                    .reveal_vault_backup(&password)
+                    .map_err(|e| e.to_string())?;
+                Ok(json!(wallet))
             }
             FfiRequest::WalletConnect {
                 private_key,

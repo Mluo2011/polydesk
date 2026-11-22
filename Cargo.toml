@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "polydesk"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.95.0"
 description = "Native GPU ultra-low-latency Polymarket CLOB V2 trading terminal (Linux, Windows 10/11, macOS, and iOS/iPadOS via Rust FFI)"
@@ -25,7 +25,7 @@ desktop = ["dep:eframe", "dep:egui"]
 [dependencies]
 # Official Polymarket CLOB V2 Rust SDK (Polymarket/rs-clob-client-v2)
 polymarket_client_sdk_v2 = { version = "0.9.1", features = ["clob", "ws", "heartbeats", "bridge"] }
-alloy = { version = "1.6", default-features = false, features = ["signer-local", "signers"] }
+alloy = { version = "1.6", default-features = false, features = ["signer-local", "signer-mnemonic", "signers"] }
 
 # Native GPU desktop GUI (Linux X11/Wayland, Windows 10/11 OpenGL, macOS) — ZERO browser / ZERO WebView!
 eframe = { version = "0.37.0", optional = true, default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "clipboard"] }
