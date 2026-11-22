@@ -61,7 +61,7 @@ jobs:
             fi
             VER="${GITHUB_REF_NAME#v}"
             if [[ -z "$VER" || "$VER" == "main" ]]; then VER="0.2.1"; fi
-            "$ISCC" "/DMyAppVersion=$VER" packaging/polydesk.iss
+            MSYS_NO_PATHCONV=1 "$ISCC" "/DMyAppVersion=$VER" packaging/polydesk.iss
           fi
 
       - uses: actions/upload-artifact@v4
