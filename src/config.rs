@@ -36,6 +36,10 @@ fn default_language() -> String {
     "en".to_string()
 }
 
+fn default_theme() -> String {
+    "dark".to_string()
+}
+
 fn default_odds_format() -> String {
     "cents".to_string()
 }
@@ -102,6 +106,8 @@ pub struct AppConfig {
 
     #[serde(default = "default_language")]
     pub language: String,
+    #[serde(default = "default_theme")]
+    pub theme: String,
     #[serde(default = "default_odds_format")]
     pub odds_format: String,
     #[serde(default = "default_stake_presets")]
@@ -148,6 +154,7 @@ impl Default for AppConfig {
             gamma_host: default_gamma_host(),
             data_host: default_data_host(),
             language: default_language(),
+            theme: default_theme(),
             odds_format: default_odds_format(),
             stake_presets: default_stake_presets(),
             default_order_type: default_order_type(),

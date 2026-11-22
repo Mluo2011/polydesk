@@ -3,18 +3,21 @@ import SwiftUI
 @main
 struct PolyDeskApp: App {
     @StateObject private var engine = EngineBridge()
+    @AppStorage("polydesk_light_mode") private var lightMode = false
 
     var body: some Scene {
         WindowGroup {
-            RootTerminalView(engine: engine)
-                .preferredColorScheme(.dark)
+            RootTerminalView(engine: engine, lightMode: $lightMode)
+                .preferredColorScheme(lightMode ? .light : .dark)
         }
     }
 }
 
 struct RootTerminalView: View {
     @ObservedObject var engine: EngineBridge
+    @Binding var lightMode: Bool
     @Environment(\.horizontalSizeClass) private var hSize
+    @Environment(\.colorScheme) private var scheme
     @State private var showWallet = false
     @State private var showMarketsRail = true
     @State private var rightMode = 0 // 0 = Quick Buy/Sell, 1 = Ladder, 2 = Pro Orders
@@ -30,18 +33,34 @@ struct RootTerminalView: View {
     @State private var trailCents = 3.0
     @State private var ruleShares = 25.0
 
+    private var canvasBg: Color {
+        scheme == .light ? Color(red: 0.945, green: 0.961, blue: 0.976) : Color(red: 0.035, green: 0.047, blue: 0.071)
+    }
+    private var panelBg: Color {
+        scheme == .light ? Color.white : Color(red: 0.051, green: 0.067, blue: 0.106)
+    }
+    private var cardBg: Color {
+        scheme == .light ? Color.white : Color(red: 0.067, green: 0.086, blue: 0.133)
+    }
+    private var subtleFill: Color {
+        scheme == .light ? Color.black.opacity(0.045) : Color.white.opacity(0.06)
+    }
+    private var dividerColor: Color {
+        scheme == .light ? Color.black.opacity(0.10) : Color.white.opacity(0.08)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             topBar
-            Divider().overlay(Color.white.opacity(0.08))
+            Divider().overlay(dividerColor)
             if hSize == .regular {
                 // Modern, breathable iPad 3-Column Layout with collapsible Market Rail
                 HStack(spacing: 0) {
                     if showMarketsRail {
                         marketsPane
                             .frame(width: 268)
-                            .background(Color(red: 0.05, green: 0.07, blue: 0.11))
-                        Divider().overlay(Color.white.opacity(0.08))
+                            .background(panelBg)
+                        Divider().overlay(dividerColor)
                     }
                     VStack(spacing: 10) {
                         marketBanner
@@ -49,8 +68,8 @@ struct RootTerminalView: View {
                         bottomDeckCard
                     }
                     .padding(12)
-                    .background(Color(red: 0.04, green: 0.05, blue: 0.08))
-                    Divider().overlay(Color.white.opacity(0.08))
+                    .background(canvasBg)
+                    Divider().overlay(dividerColor)
                     VStack(spacing: 8) {
                         Picker("", selection: $rightMode) {
                             Text(engine.t("Buy / Sell", "快捷买卖")).tag(0)
@@ -70,7 +89,7 @@ struct RootTerminalView: View {
                         }
                     }
                     .frame(width: 405)
-                    .background(Color(red: 0.05, green: 0.07, blue: 0.11))
+                    .background(panelBg)
                 }
             } else {
                 // Native iPhone / iPad Portrait Tabs
@@ -101,14 +120,15 @@ struct RootTerminalView: View {
                 }
             }
         }
-        .background(Color(red: 0.04, green: 0.05, blue: 0.08))
+        .background(canvasBg)
         .overlay(alignment: .bottomTrailing) {
             if let msg = engine.toast {
                 Text(msg)
                     .font(.caption.monospaced())
+                    .foregroundColor(.white)
                     .padding(.horizontal, 12).padding(.vertical, 8)
-                    .background(Color(red: 0.06, green: 0.08, blue: 0.12).opacity(0.96))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.cyan, lineWidth: 1))
+                    .background(Color(red: 0.06, green: 0.08, blue: 0.12).opacity(0.95))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.blue, lineWidth: 1))
                     .cornerRadius(8)
                     .padding(14)
             }
@@ -144,13 +164,13 @@ struct RootTerminalView: View {
             HStack(spacing: 8) {
                 Text("\(engine.t("Portfolio", "总资产")) \(String(format: "$%.2f", cash + posVal))")
                     .font(.caption.monospacedDigit().bold())
-                    .foregroundColor(.white)
+                    .foregroundColor(.primary)
                 Text("\(engine.t("Cash", "余额")) \(String(format: "$%.2f", cash))")
                     .font(.caption.monospacedDigit().bold())
                     .foregroundColor(.green)
             }
             .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(Color.white.opacity(0.06))
+            .background(subtleFill)
             .cornerRadius(8)
 
             if let tel = engine.telemetry {
@@ -162,6 +182,10 @@ struct RootTerminalView: View {
 
             Spacer()
 
+            Button(lightMode ? engine.t("Dark", "深色") : engine.t("Light", "浅色")) {
+                lightMode.toggle()
+            }
+            .font(.caption).buttonStyle(.bordered)
             Button(engine.oddsFmt.label) { engine.oddsFmt = engine.oddsFmt.next() }
                 .font(.caption.monospaced()).buttonStyle(.bordered)
             Button(engine.zh ? "EN" : "中文") {
@@ -175,7 +199,7 @@ struct RootTerminalView: View {
                 .font(.caption.bold()).foregroundColor(.red).buttonStyle(.bordered)
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
-        .background(Color(red: 0.05, green: 0.07, blue: 0.11))
+        .background(panelBg)
         .transaction { $0.animation = nil }
     }
 
@@ -198,7 +222,7 @@ struct RootTerminalView: View {
                                 .lineLimit(1)
                                 .frame(width: 132)
                                 .padding(.horizontal, 8).padding(.vertical, 6)
-                                .background(engine.activeOutcomeIdx == idx ? (idx == 0 ? Color.green.opacity(0.24) : Color.red.opacity(0.24)) : Color.white.opacity(0.06))
+                                .background(engine.activeOutcomeIdx == idx ? (idx == 0 ? Color.green.opacity(0.22) : Color.red.opacity(0.22)) : subtleFill)
                                 .foregroundColor(idx == 0 ? .green : .red)
                                 .cornerRadius(7)
                         }
@@ -236,7 +260,7 @@ struct RootTerminalView: View {
                             VStack(alignment: .leading, spacing: 5) {
                                 Text(m.displayQuestion(zh: engine.zh))
                                     .font(.caption)
-                                    .foregroundColor(.white)
+                                    .foregroundColor(.primary)
                                     .lineLimit(2)
                                     .multilineTextAlignment(.leading)
                                 HStack {
@@ -249,8 +273,8 @@ struct RootTerminalView: View {
                                 .font(.caption2.monospacedDigit())
                             }
                             .padding(10)
-                            .background(sel ? Color.cyan.opacity(0.14) : Color.white.opacity(0.04))
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(sel ? Color.cyan : Color.white.opacity(0.07), lineWidth: 1))
+                            .background(sel ? Color.blue.opacity(0.14) : subtleFill)
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(sel ? Color.blue : dividerColor, lineWidth: 1))
                             .cornerRadius(8)
                         }
                     }
@@ -262,7 +286,7 @@ struct RootTerminalView: View {
                         .font(.caption.bold())
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 8)
-                        .background(Color.white.opacity(0.06))
+                        .background(subtleFill)
                         .cornerRadius(8)
                     }
                 }
@@ -295,7 +319,7 @@ struct RootTerminalView: View {
                                 }
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 10)
-                                .background(engine.activeOutcomeIdx == idx ? (idx == 0 ? Color.green.opacity(0.26) : Color.red.opacity(0.26)) : Color.white.opacity(0.06))
+                                .background(engine.activeOutcomeIdx == idx ? (idx == 0 ? Color.green.opacity(0.24) : Color.red.opacity(0.24)) : subtleFill)
                                 .foregroundColor(idx == 0 ? .green : .red)
                                 .cornerRadius(10)
                             }
@@ -313,18 +337,18 @@ struct RootTerminalView: View {
                         .keyboardType(.decimalPad)
                         .font(.title3.monospacedDigit().bold())
                         .padding(10)
-                        .background(Color.white.opacity(0.06))
+                        .background(subtleFill)
                         .cornerRadius(9)
 
                     HStack(spacing: 6) {
                         ForEach([1, 10, 50, 100], id: \.self) { v in
-                            Button("+$\(v)") {
+                            Button(quickBuy ? "+$\(v)" : "+\(v)") {
                                 quickAmountText = String(format: "%.0f", amt + Double(v))
                             }
                             .font(.caption.monospacedDigit().bold())
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 7)
-                            .background(Color.white.opacity(0.07))
+                            .background(subtleFill)
                             .cornerRadius(7)
                         }
                     }
@@ -349,7 +373,7 @@ struct RootTerminalView: View {
                     }
                     .font(.caption)
                     .padding(12)
-                    .background(Color.white.opacity(0.04))
+                    .background(subtleFill)
                     .cornerRadius(10)
 
                     Button {
@@ -357,12 +381,12 @@ struct RootTerminalView: View {
                     } label: {
                         Text(quickBuy
                              ? "\(engine.t("Buy", "立即买入")) \(m.displayOutcome(engine.activeOutcomeIdx, zh: engine.zh)) · $\(String(format: "%.0f", amt))"
-                             : "\(engine.t("Sell", "立即卖出")) \(m.displayOutcome(engine.activeOutcomeIdx, zh: engine.zh)) · \(String(format: "%.1f", shares)) sh")
+                             : "\(engine.t("Sell", "立即卖出")) \(m.displayOutcome(engine.activeOutcomeIdx, zh: engine.zh)) · \(String(format: "%.1f", shares)) \(engine.t("shares", "份"))")
                             .font(.headline.bold())
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 13)
                             .background(quickBuy ? Color.green : Color.red)
-                            .foregroundColor(quickBuy ? .black : .white)
+                            .foregroundColor(.white)
                             .cornerRadius(11)
                     }
                 }
@@ -391,7 +415,7 @@ struct RootTerminalView: View {
                                 HStack {
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(p.market_question).font(.caption).lineLimit(1)
-                                        Text(String(format: "%@ · %.1f sh @ %.1f¢", p.outcome, p.shares, p.avg_entry * 100))
+                                        Text(String(format: "%@ · %.1f %@ @ %.1f¢", p.outcome, p.shares, engine.t("shares", "份"), p.avg_entry * 100))
                                             .font(.caption2.monospacedDigit()).foregroundColor(.secondary)
                                     }
                                     Spacer()
@@ -434,8 +458,8 @@ struct RootTerminalView: View {
             }
         }
         .padding(12)
-        .background(Color(red: 0.07, green: 0.09, blue: 0.14))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.white.opacity(0.08), lineWidth: 1))
+        .background(cardBg)
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(dividerColor, lineWidth: 1))
         .cornerRadius(10)
     }
 

@@ -6,12 +6,13 @@ use polydesk::i18n::tr;
 use polydesk::odds::format_usd;
 use polydesk::vault::WalletSignatureType;
 
+use super::theme::ThemePalette;
 use super::{ActiveModal, PolyDeskDesktop, WalletSetupTab};
 
-fn card_frame() -> Frame {
+fn card_frame(pal: ThemePalette) -> Frame {
     Frame::NONE
-        .fill(Color32::from_rgb(20, 27, 40))
-        .stroke(Stroke::new(1.0, Color32::from_rgb(31, 41, 55)))
+        .fill(pal.bg_sub)
+        .stroke(Stroke::new(1.0, pal.border))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(Margin::same(14))
 }
@@ -64,12 +65,13 @@ impl PolyDeskDesktop {
 
     fn draw_wallet_and_deposit_modal(&mut self, ui: &mut egui::Ui) {
         let l = self.lang;
+        let pal = self.palette();
         let acc = self.account.clone();
 
         // Security Guarantee Banner
         Frame::NONE
-            .fill(Color32::from_rgba_unmultiplied(16, 185, 129, 18))
-            .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(16, 185, 129, 80)))
+            .fill(Color32::from_rgba_unmultiplied(16, 185, 129, if pal.light { 22 } else { 18 }))
+            .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(16, 185, 129, 90)))
             .corner_radius(CornerRadius::same(8))
             .inner_margin(Margin::same(10))
             .show(ui, |ui| {
@@ -80,7 +82,7 @@ impl PolyDeskDesktop {
                         "100% 纯本机非托管：助记词与私钥均在本机随机生成并用 Argon2id + AES-256-GCM 加密保存，永不上传任何服务器；仅在本地完成 EIP-712 签名后发送订单。",
                     ))
                     .small()
-                    .color(Color32::from_rgb(167, 243, 208)),
+                    .color(pal.green_text),
                 );
             });
 
@@ -89,8 +91,8 @@ impl PolyDeskDesktop {
         // Secret Phrase & Private Key Backup Card (shown immediately after creating a wallet or revealing backup)
         if let Some(w) = self.revealed_wallet.clone() {
             Frame::NONE
-                .fill(Color32::from_rgba_unmultiplied(245, 158, 11, 20))
-                .stroke(Stroke::new(1.2, Color32::from_rgb(251, 191, 36)))
+                .fill(Color32::from_rgba_unmultiplied(245, 158, 11, if pal.light { 24 } else { 20 }))
+                .stroke(Stroke::new(1.2, pal.amber))
                 .corner_radius(CornerRadius::same(10))
                 .inner_margin(Margin::same(12))
                 .show(ui, |ui| {
@@ -103,7 +105,7 @@ impl PolyDeskDesktop {
                             ))
                             .strong()
                             .size(13.5)
-                            .color(Color32::from_rgb(251, 191, 36)),
+                            .color(pal.amber),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.small_button(tr(l, "I Saved Them — Hide", "已保存，隐藏")).clicked() {
@@ -119,13 +121,13 @@ impl PolyDeskDesktop {
                             "请离线抄写保存下方的 12 词助记词与私钥，绝不要发给任何人。你随时可以把这 12 个助记词导入 MetaMask / Rabby 钱包自由管理或提现。",
                         ))
                         .small()
-                        .color(Color32::from_rgb(253, 230, 138)),
+                        .color(pal.text_secondary),
                     );
                     ui.add_space(8.0);
 
                     egui::Grid::new("backup_keys_grid").num_columns(3).spacing([8.0, 6.0]).show(ui, |ui| {
                         ui.label(RichText::new(tr(l, "Local Address", "本地钱包地址")).strong().small());
-                        ui.label(RichText::new(&w.address).monospace().small().color(Color32::from_rgb(56, 189, 248)));
+                        ui.label(RichText::new(&w.address).monospace().small().color(pal.cyan));
                         if ui.small_button(tr(l, "Copy", "复制")).clicked() {
                             ui.ctx().copy_text(w.address.clone());
                             self.push_toast(tr(l, "Copied local address", "已复制本地钱包地址").into(), false);
@@ -136,7 +138,7 @@ impl PolyDeskDesktop {
                             ui.label(RichText::new(tr(l, "Secret Phrase (12w)", "12词助记词")).strong().small());
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(phrase).monospace().small().color(Color32::from_rgb(254, 243, 199)),
+                                    RichText::new(phrase).monospace().small().color(pal.text_primary),
                                 )
                                 .wrap(),
                             );
@@ -153,7 +155,7 @@ impl PolyDeskDesktop {
                         } else {
                             w.private_key.clone()
                         };
-                        ui.label(RichText::new(pk_short).monospace().small().color(Color32::from_rgb(252, 165, 165)))
+                        ui.label(RichText::new(pk_short).monospace().small().color(pal.red_text))
                             .on_hover_text(&w.private_key);
                         if ui.small_button(tr(l, "Copy", "复制")).clicked() {
                             ui.ctx().copy_text(w.private_key.clone());
@@ -166,7 +168,7 @@ impl PolyDeskDesktop {
         }
 
         // 1. Paper Simulator Card
-        card_frame().show(ui, |ui| {
+        card_frame(pal).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(tr(l, "Paper Simulator", "模拟盘账户")).strong().size(13.5).color(Color32::from_rgb(251, 191, 36)));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -200,7 +202,7 @@ impl PolyDeskDesktop {
         ui.add_space(10.0);
 
         // 2. Local Encrypted Live Vault (Create New Random Wallet OR Import Private Key/Phrase)
-        card_frame().show(ui, |ui| {
+        card_frame(pal).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(tr(l, "Live Trading Vault (Local Only)", "实盘本地加密钱包")).strong().size(13.5).color(Color32::from_rgb(16, 185, 129)));
                 if acc.live_connected {
@@ -372,7 +374,7 @@ impl PolyDeskDesktop {
         ui.add_space(10.0);
 
         // 3. Direct USDT / USDC Deposit (Official Polymarket Bridge)
-        card_frame().show(ui, |ui| {
+        card_frame(pal).show(ui, |ui| {
             ui.label(
                 RichText::new(tr(
                     l,
@@ -450,7 +452,8 @@ impl PolyDeskDesktop {
 
     fn draw_updater_section(&mut self, ui: &mut egui::Ui) {
         let l = self.lang;
-        card_frame().show(ui, |ui| {
+        let pal = self.palette();
+        card_frame(pal).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(tr(l, "GitHub Releases Auto-Updater", "GitHub 自动更新")).strong().size(13.5).color(Color32::from_rgb(56, 189, 248)));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -487,7 +490,8 @@ impl PolyDeskDesktop {
 
     fn draw_hotkeys_section(&self, ui: &mut egui::Ui) {
         let l = self.lang;
-        card_frame().show(ui, |ui| {
+        let pal = self.palette();
+        card_frame(pal).show(ui, |ui| {
             ui.label(RichText::new(tr(l, "Keyboard Hotkeys (Instant Keydown)", "键盘快捷键（按下即触发）")).strong().size(13.5));
             ui.add_space(6.0);
             let rows = [

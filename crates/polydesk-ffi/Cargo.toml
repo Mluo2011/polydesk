@@ -1,6 +1,6 @@
 [package]
 name = "polydesk-ffi"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 description = "C-ABI static library exposing the native Rust PolyDesk CLOB V2 engine to SwiftUI on iOS / iPadOS"
 

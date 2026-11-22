@@ -2,6 +2,7 @@ import SwiftUI
 
 struct LadderView: View {
     @ObservedObject var engine: EngineBridge
+    @Environment(\.colorScheme) private var scheme
     @State private var centerPrice: Double = 0.50
     @State private var initialized: Bool = false
     @State private var autoCenter: Bool = true
@@ -21,7 +22,7 @@ struct LadderView: View {
                         }
                         .font(.system(size: 11, weight: .semibold, design: .monospaced))
                         .padding(.horizontal, 8).padding(.vertical, 5)
-                        .background(engine.orderType == ot ? Color.cyan.opacity(0.25) : Color.white.opacity(0.06))
+                        .background(engine.orderType == ot ? Color.blue.opacity(0.22) : (scheme == .light ? Color.black.opacity(0.05) : Color.white.opacity(0.06)))
                         .cornerRadius(6)
                     }
                     Toggle(engine.t("PostOnly", "挂单"), isOn: $engine.postOnly)
@@ -38,7 +39,7 @@ struct LadderView: View {
                         .font(.system(size: 11, weight: .bold, design: .monospaced))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 6)
-                        .background(abs(engine.stakeUsd - p) < 0.1 ? Color.cyan.opacity(0.28) : Color.white.opacity(0.06))
+                        .background(abs(engine.stakeUsd - p) < 0.1 ? Color.blue.opacity(0.24) : (scheme == .light ? Color.black.opacity(0.05) : Color.white.opacity(0.06)))
                         .cornerRadius(6)
                 }
                 Button(engine.t("Green-Up", "锁盈")) { engine.executeGreenUp(strategy: "close") }
@@ -133,7 +134,7 @@ struct LadderView: View {
                                         }
                                         Text(bSz > 0 ? fmtSz(bSz) : "")
                                             .font(.system(size: 11.5, design: .monospaced))
-                                            .foregroundColor(Color(red: 0.6, green: 0.97, blue: 0.84))
+                                            .foregroundColor(scheme == .light ? Color(red: 0.02, green: 0.47, blue: 0.34) : Color(red: 0.6, green: 0.97, blue: 0.84))
                                             .padding(.trailing, 5)
                                     }
                                     .frame(height: 32)
@@ -142,9 +143,9 @@ struct LadderView: View {
                                 // Center Price
                                 Text(engine.oddsFmt.format(price, tick: step))
                                     .font(.system(size: 12, weight: .bold, design: .monospaced))
-                                    .foregroundColor(.white)
+                                    .foregroundColor(.primary)
                                     .frame(width: 70, height: 32)
-                                    .background(Color(red: 0.07, green: 0.09, blue: 0.14))
+                                    .background(scheme == .light ? Color(red: 0.945, green: 0.961, blue: 0.976) : Color(red: 0.07, green: 0.09, blue: 0.14))
 
                                 // Ask Depth -> One-Tap SELL
                                 Button {
@@ -158,7 +159,7 @@ struct LadderView: View {
                                         }
                                         Text(aSz > 0 ? fmtSz(aSz) : "")
                                             .font(.system(size: 11.5, design: .monospaced))
-                                            .foregroundColor(Color(red: 1.0, green: 0.68, blue: 0.75))
+                                            .foregroundColor(scheme == .light ? Color(red: 0.74, green: 0.07, blue: 0.24) : Color(red: 1.0, green: 0.68, blue: 0.75))
                                             .padding(.leading, 5)
                                     }
                                     .frame(height: 32)
@@ -189,14 +190,14 @@ struct LadderView: View {
                                 .frame(width: 56, alignment: .trailing)
                             }
                             .padding(.horizontal, 4)
-                            .background(Color.white.opacity(0.02))
+                            .background(scheme == .light ? Color.black.opacity(0.025) : Color.white.opacity(0.02))
                         }
                     }
                 }
             }
             .transaction { $0.animation = nil }
         }
-        .background(Color(red: 0.04, green: 0.05, blue: 0.08))
+        .background(scheme == .light ? Color.white : Color(red: 0.04, green: 0.05, blue: 0.08))
         .onChange(of: engine.book?.mid) { newMid in
             guard let mid = newMid else { return }
             let step = max(0.001, engine.ladderStep)

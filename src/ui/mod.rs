@@ -1,6 +1,7 @@
 pub mod chart;
 pub mod ladder;
 pub mod modals;
+pub mod theme;
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -30,6 +31,7 @@ use polydesk::vault::{GeneratedWallet, WalletSignatureType};
 
 use self::chart::{ChartMode, IndicatorConfig, draw_price_chart};
 use self::ladder::{LadderAction, LadderState, draw_price_ladder};
+use self::theme::{ThemePalette, apply_theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveModal {
@@ -95,6 +97,7 @@ pub struct PolyDeskDesktop {
     rx: mpsc::UnboundedReceiver<UiMsg>,
 
     pub(crate) lang: Lang,
+    pub(crate) light_mode: bool,
     pub(crate) odds_fmt: OddsFormat,
     pub(crate) modal: Option<ActiveModal>,
     pub(crate) account: AccountState,
@@ -168,12 +171,17 @@ pub struct PolyDeskDesktop {
 }
 
 impl PolyDeskDesktop {
+    pub(crate) fn palette(&self) -> ThemePalette {
+        ThemePalette::from_light(self.light_mode)
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>, core: Arc<CoreEngine>, rt: Arc<Runtime>) -> Self {
-        install_modern_theme(&cc.egui_ctx);
+        let cfg = core.config.read().clone();
+        let light_mode = cfg.theme.eq_ignore_ascii_case("light");
+        apply_theme(&cc.egui_ctx, light_mode);
         install_cjk_fonts(&cc.egui_ctx);
 
         let (tx, rx) = mpsc::unbounded_channel();
-        let cfg = core.config.read().clone();
         let account = rt.block_on(core.execution.account_state());
 
         let app = Self {
@@ -182,6 +190,7 @@ impl PolyDeskDesktop {
             tx: tx.clone(),
             rx,
             lang: Lang::from_code(&cfg.language),
+            light_mode,
             odds_fmt: OddsFormat::from_str_code(&cfg.odds_format),
             modal: None,
             account,
@@ -867,22 +876,6 @@ impl PolyDeskDesktop {
     }
 }
 
-fn surface_card() -> Frame {
-    Frame::NONE
-        .fill(Color32::from_rgb(17, 22, 34))
-        .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(148, 163, 184, 24)))
-        .corner_radius(CornerRadius::same(12))
-        .inner_margin(Margin::same(14))
-}
-
-fn pill_frame(fill: Color32, stroke: Color32) -> Frame {
-    Frame::NONE
-        .fill(fill)
-        .stroke(Stroke::new(1.0, stroke))
-        .corner_radius(CornerRadius::same(10))
-        .inner_margin(Margin::symmetric(12, 6))
-}
-
 impl eframe::App for PolyDeskDesktop {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
@@ -890,14 +883,15 @@ impl eframe::App for PolyDeskDesktop {
         self.handle_hotkeys(&ctx);
 
         let l = self.lang;
+        let pal = self.palette();
         let telem = self.core.telemetry.snapshot();
         let active_aid = self.active_asset_id().map(|s| s.to_string());
         let active_book = active_aid.as_deref().and_then(|a| self.core.feed.get_book_view(a, 60));
 
-        // 1. MODERN 58px TOP BAR WITH PROMINENT PORTFOLIO & CASH BALANCE
+        // 1. MODERN 58px TOP BAR WITH PROMINENT PORTFOLIO & CASH BALANCE (Light + Dark!)
         let top_frame = Frame::NONE
-            .fill(Color32::from_rgb(13, 17, 27))
-            .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(148, 163, 184, 22)))
+            .fill(pal.bg_panel)
+            .stroke(Stroke::new(1.0, pal.border))
             .inner_margin(Margin::symmetric(16, 8));
 
         egui::Panel::top("top_bar").exact_size(58.0).frame(top_frame).show(ui, |ui| {
@@ -908,14 +902,14 @@ impl eframe::App for PolyDeskDesktop {
                     self.show_markets_rail = !self.show_markets_rail;
                 }
 
-                let ws_col = if telem.ws_connected { Color32::from_rgb(0, 211, 149) } else { Color32::from_rgb(255, 77, 106) };
+                let ws_col = if telem.ws_connected { pal.green } else { pal.red };
                 ui.label(RichText::new("●").color(ws_col).size(11.0));
-                ui.label(RichText::new("PolyDesk").strong().size(17.5).color(Color32::from_rgb(248, 250, 252)));
+                ui.label(RichText::new("PolyDesk").strong().size(17.5).color(pal.text_primary));
 
                 // Mode badge (PAPER / LIVE)
                 let is_live = self.account.mode == TradingMode::Live;
-                let mode_col = if is_live { Color32::from_rgb(0, 211, 149) } else { Color32::from_rgb(251, 191, 36) };
-                let mode_bg = if is_live { Color32::from_rgba_unmultiplied(0, 211, 149, 26) } else { Color32::from_rgba_unmultiplied(245, 158, 11, 24) };
+                let mode_col = if is_live { pal.green } else { pal.amber };
+                let mode_bg = if is_live { Color32::from_rgba_unmultiplied(16, 185, 129, 26) } else { Color32::from_rgba_unmultiplied(245, 158, 11, 24) };
                 if ui.add(
                     egui::Button::new(RichText::new(if is_live { tr(l, "LIVE", "实盘") } else { tr(l, "PAPER", "模拟盘") }).strong().size(11.0).color(mode_col))
                         .fill(mode_bg)
@@ -936,21 +930,21 @@ impl eframe::App for PolyDeskDesktop {
                 }
                 let portfolio = cash + pos_val;
                 let pnl = if is_live { upnl } else { self.account.paper.realized_pnl_usd + upnl };
-                let pnl_col = if pnl >= 0.0 { Color32::from_rgb(0, 211, 149) } else { Color32::from_rgb(255, 77, 106) };
+                let pnl_col = if pnl >= 0.0 { pal.green } else { pal.red };
 
-                pill_frame(Color32::from_rgb(19, 25, 39), Color32::from_rgba_unmultiplied(148, 163, 184, 30)).show(ui, |ui| {
+                pal.pill_frame().show(ui, |ui| {
                     ui.set_width(356.0);
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 14.0;
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 5.0;
-                            ui.label(RichText::new(tr(l, "Portfolio", "总资产")).small().color(Color32::from_rgb(138, 154, 178)));
-                            ui.label(RichText::new(format!("{:>9}", format_usd(portfolio, false))).monospace().strong().size(13.5).color(Color32::from_rgb(248, 250, 252)));
+                            ui.label(RichText::new(tr(l, "Portfolio", "总资产")).small().color(pal.text_muted));
+                            ui.label(RichText::new(format!("{:>9}", format_usd(portfolio, false))).monospace().strong().size(13.5).color(pal.text_primary));
                         });
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 5.0;
-                            ui.label(RichText::new(tr(l, "Cash", "余额")).small().color(Color32::from_rgb(138, 154, 178)));
-                            ui.label(RichText::new(format!("{:>9}", format_usd(cash, false))).monospace().strong().size(13.5).color(Color32::from_rgb(0, 211, 149)));
+                            ui.label(RichText::new(tr(l, "Cash", "余额")).small().color(pal.text_muted));
+                            ui.label(RichText::new(format!("{:>9}", format_usd(cash, false))).monospace().strong().size(13.5).color(pal.green));
                         });
                         ui.label(RichText::new(format!("{:>8}", format_usd(pnl, true))).monospace().strong().size(12.5).color(pnl_col));
                     });
@@ -958,28 +952,35 @@ impl eframe::App for PolyDeskDesktop {
 
                 // Subtle compact latency indicator
                 let clob_ms = if telem.warm_ping_ms.p50 > 0.0 { telem.warm_ping_ms.p50 } else { telem.order_rtt_ms.last };
-                let clob_col = if clob_ms <= 0.0 { Color32::GRAY } else if clob_ms < 60.0 { Color32::from_rgb(0, 211, 149) } else if clob_ms < 200.0 { Color32::from_rgb(251, 191, 36) } else { Color32::from_rgb(148, 163, 184) };
-                pill_frame(Color32::from_rgb(15, 20, 31), Color32::from_rgba_unmultiplied(148, 163, 184, 18)).show(ui, |ui| {
-                    ui.set_width(140.0);
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 5.0;
-                        ui.label(RichText::new(format!("WS {:>3.0}ms", telem.ws_lag_ms.p50.min(999.0))).monospace().small().color(Color32::from_rgb(100, 116, 139)));
-                        ui.label(RichText::new("·").color(Color32::from_rgb(51, 65, 85)));
-                        ui.label(RichText::new(format!("{:>3.0}ms", clob_ms.min(999.0))).monospace().small().color(clob_col));
-                    });
-                }).response.on_hover_text(format!(
-                    "CLOB RTT: {:.0} ms | Book apply: {:.0} µs | EIP-712 Sign: {:.0} µs | WS msgs: {}",
-                    clob_ms, telem.book_apply_us.p50, telem.sign_us.last, telem.ws_msgs_total
-                ));
+                let clob_col = if clob_ms <= 0.0 { pal.text_muted } else if clob_ms < 60.0 { pal.green } else if clob_ms < 200.0 { pal.amber } else { pal.text_muted };
+                Frame::NONE
+                    .fill(pal.bg_sub)
+                    .stroke(Stroke::new(1.0, pal.border))
+                    .corner_radius(CornerRadius::same(10))
+                    .inner_margin(Margin::symmetric(10, 6))
+                    .show(ui, |ui| {
+                        ui.set_width(136.0);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 5.0;
+                            ui.label(RichText::new(format!("WS {:>3.0}ms", telem.ws_lag_ms.p50.min(999.0))).monospace().small().color(pal.text_muted));
+                            ui.label(RichText::new("·").color(pal.border_strong));
+                            ui.label(RichText::new(format!("{:>3.0}ms", clob_ms.min(999.0))).monospace().small().color(clob_col));
+                        });
+                    })
+                    .response
+                    .on_hover_text(format!(
+                        "CLOB RTT: {:.0} ms | Book apply: {:.0} µs | EIP-712 Sign: {:.0} µs | WS msgs: {}",
+                        clob_ms, telem.book_apply_us.p50, telem.sign_us.last, telem.ws_msgs_total
+                    ));
 
-                // Right actions — sleek modern buttons
+                // Right actions — sleek modern buttons including 1-click Light / Dark mode toggle!
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.spacing_mut().item_spacing.x = 7.0;
 
                     if ui.add(
-                        egui::Button::new(RichText::new(tr(l, "Cancel All", "全撤")).strong().size(12.0).color(Color32::from_rgb(254, 205, 211)))
-                            .fill(Color32::from_rgba_unmultiplied(255, 77, 106, 26))
-                            .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 77, 106, 110)))
+                        egui::Button::new(RichText::new(tr(l, "Cancel All", "全撤")).strong().size(12.0).color(pal.red_text))
+                            .fill(Color32::from_rgba_unmultiplied(244, 63, 94, if pal.light { 22 } else { 26 }))
+                            .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(244, 63, 94, 110)))
                             .corner_radius(CornerRadius::same(9)),
                     ).clicked() {
                         let core = self.core.clone();
@@ -992,18 +993,31 @@ impl eframe::App for PolyDeskDesktop {
                     } else {
                         tr(l, "Settings", "设置")
                     };
-                    if ui.button(RichText::new(settings_lbl).size(12.0).color(if upd_dot { Color32::from_rgb(0, 211, 149) } else { Color32::from_rgb(203, 213, 225) })).on_hover_text(tr(l, "Updates & Keyboard Hotkeys", "自动更新与快捷键")).clicked() {
+                    if ui.button(RichText::new(settings_lbl).size(12.0).color(if upd_dot { pal.green } else { pal.text_secondary })).on_hover_text(tr(l, "Updates & Keyboard Hotkeys", "自动更新与快捷键")).clicked() {
                         self.modal = Some(ActiveModal::SettingsAndUpdates);
                     }
 
-                    // Primary vibrant Polymarket-blue Deposit / Wallet button
+                    // Primary vibrant blue Deposit / Wallet button
                     if ui.add(
                         egui::Button::new(RichText::new(tr(l, "+ Deposit / Wallet", "+ 充值 / 钱包")).strong().size(12.5).color(Color32::WHITE))
-                            .fill(Color32::from_rgb(46, 124, 246))
+                            .fill(pal.blue)
                             .stroke(Stroke::NONE)
                             .corner_radius(CornerRadius::same(9)),
                     ).clicked() {
                         self.modal = Some(ActiveModal::WalletAndDeposit);
+                    }
+
+                    // 1-Click Light / Dark Mode Switcher!
+                    let theme_lbl = if self.light_mode {
+                        tr(l, "Dark", "深色")
+                    } else {
+                        tr(l, "Light", "浅色")
+                    };
+                    if ui.button(RichText::new(theme_lbl).size(12.0)).on_hover_text(tr(l, "Switch Light / Dark theme", "切换浅色 / 深色主题")).clicked() {
+                        self.light_mode = !self.light_mode;
+                        apply_theme(&ctx, self.light_mode);
+                        let mode_str = if self.light_mode { "light" } else { "dark" }.to_string();
+                        let _ = self.core.execution.update_config_and_save(|cfg| cfg.theme = mode_str);
                     }
 
                     if ui.button(if l == Lang::En { "中文" } else { "EN" }).clicked() {
@@ -1025,8 +1039,8 @@ impl eframe::App for PolyDeskDesktop {
         // 2. COLLAPSIBLE LEFT MARKET RAIL (Modern rounded cards + ALL Polymarket pagination!)
         if self.show_markets_rail {
             let rail_frame = Frame::NONE
-                .fill(Color32::from_rgb(13, 17, 27))
-                .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(148, 163, 184, 20)))
+                .fill(pal.bg_panel)
+                .stroke(Stroke::new(1.0, pal.border))
                 .inner_margin(Margin::same(12));
 
             egui::Panel::left("markets_panel").exact_size(286.0).resizable(false).frame(rail_frame).show(ui, |ui| {
@@ -1082,8 +1096,12 @@ impl eframe::App for PolyDeskDesktop {
                     for m in &self.markets {
                         if self.category == "watch" && !wl.contains(&m.condition_id) { continue; }
                         let sel = self.active_market.as_ref().is_some_and(|a| a.condition_id == m.condition_id);
-                        let fill = if sel { Color32::from_rgba_unmultiplied(46, 124, 246, 26) } else { Color32::from_rgb(19, 25, 38) };
-                        let stroke = if sel { Color32::from_rgb(46, 124, 246) } else { Color32::from_rgba_unmultiplied(148, 163, 184, 20) };
+                        let fill = if sel {
+                            Color32::from_rgba_unmultiplied(46, 124, 246, if pal.light { 24 } else { 26 })
+                        } else {
+                            pal.bg_sub
+                        };
+                        let stroke = if sel { pal.blue } else { pal.border };
 
                         Frame::NONE
                             .fill(fill)
@@ -1093,12 +1111,12 @@ impl eframe::App for PolyDeskDesktop {
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     let starred = wl.contains(&m.condition_id);
-                                    if ui.add(egui::Button::new(RichText::new("★").color(if starred { Color32::from_rgb(251, 191, 36) } else { Color32::from_rgb(71, 85, 105) })).frame(false)).clicked() {
+                                    if ui.add(egui::Button::new(RichText::new("★").color(if starred { pal.amber } else { pal.text_muted })).frame(false)).clicked() {
                                         toggle_star = Some(m.condition_id.clone());
                                     }
                                     let display_q = self.display_text(&m.question);
                                     let q_resp = ui.add(
-                                        egui::Label::new(RichText::new(&display_q).size(12.5).color(Color32::from_rgb(235, 240, 248)))
+                                        egui::Label::new(RichText::new(&display_q).size(12.5).color(pal.text_primary))
                                             .wrap()
                                             .sense(egui::Sense::click()),
                                     );
@@ -1115,11 +1133,11 @@ impl eframe::App for PolyDeskDesktop {
                                 ui.horizontal(|ui| {
                                     let yp = m.outcome_prices.first().copied().or(m.last_trade_price);
                                     let np = m.outcome_prices.get(1).copied().or_else(|| yp.map(|y| 1.0 - y));
-                                    ui.label(RichText::new(format_odds(yp, self.odds_fmt, m.tick_size)).monospace().strong().size(12.0).color(Color32::from_rgb(0, 211, 149)));
-                                    ui.label(RichText::new("/").color(Color32::from_rgb(71, 85, 105)));
-                                    ui.label(RichText::new(format_odds(np, self.odds_fmt, m.tick_size)).monospace().strong().size(12.0).color(Color32::from_rgb(255, 77, 106)));
+                                    ui.label(RichText::new(format_odds(yp, self.odds_fmt, m.tick_size)).monospace().strong().size(12.0).color(pal.green));
+                                    ui.label(RichText::new("/").color(pal.text_muted));
+                                    ui.label(RichText::new(format_odds(np, self.odds_fmt, m.tick_size)).monospace().strong().size(12.0).color(pal.red));
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        ui.label(RichText::new(format!("{} Vol", format_usd(m.volume_24hr, false))).monospace().small().color(Color32::from_rgb(100, 116, 139)));
+                                        ui.label(RichText::new(format!("{} Vol", format_usd(m.volume_24hr, false))).monospace().small().color(pal.text_muted));
                                     });
                                 });
                             });
@@ -1135,8 +1153,8 @@ impl eframe::App for PolyDeskDesktop {
                         };
                         if ui.add_sized(
                             Vec2::new(ui.available_width(), 30.0),
-                            egui::Button::new(RichText::new(lbl).small().color(Color32::from_rgb(148, 163, 184)))
-                                .fill(Color32::from_rgb(19, 25, 38))
+                            egui::Button::new(RichText::new(lbl).small().color(pal.text_secondary))
+                                .fill(pal.bg_chip)
                                 .corner_radius(CornerRadius::same(8)),
                         ).clicked() && !self.loading_more_markets {
                             want_load_more = true;
@@ -1160,7 +1178,7 @@ impl eframe::App for PolyDeskDesktop {
 
                 if let Some(sib) = self.siblings.clone() {
                     ui.add_space(8.0);
-                    surface_card().show(ui, |ui| {
+                    pal.surface_card().show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(tr(l, "Siblings", "关联子市场")).strong().small().color(Color32::from_rgb(56, 189, 248)));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1211,8 +1229,8 @@ impl eframe::App for PolyDeskDesktop {
 
         // 3. SPACIOUS MODERN RIGHT EXECUTION COLUMN (426px — Quick Buy/Sell | Ladder | Pro Orders!)
         let right_frame = Frame::NONE
-            .fill(Color32::from_rgb(13, 17, 27))
-            .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(148, 163, 184, 20)))
+            .fill(pal.bg_panel)
+            .stroke(Stroke::new(1.0, pal.border))
             .inner_margin(Margin::same(14));
 
         egui::Panel::right("exec_panel").exact_size(426.0).resizable(false).frame(right_frame).show(ui, |ui| {
@@ -1255,7 +1273,7 @@ impl eframe::App for PolyDeskDesktop {
                 }
                 RightTab::Ladder => {
                     // Fixed-height Controls Card (ZERO reflow or height jitter on ticks!)
-                    surface_card().show(ui, |ui| {
+                    pal.surface_card().show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         // Row 1: Order Types (single non-wrapping line)
                         ui.horizontal(|ui| {
@@ -1344,10 +1362,11 @@ impl eframe::App for PolyDeskDesktop {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(format!(
-                                    "{} {:>5} · {:>6.1} sh  |  {} {} + {}({}bp) {}",
+                                    "{} {:>5} · {:>6.1} {}  |  {} {} + {}({}bp) {}",
                                     tr(l, "Spread", "点差"),
                                     spread_str,
                                     est_sh,
+                                    tr(l, "shares", "份"),
                                     tr(l, "Proto", "平台"),
                                     format_usd(p_fee, false),
                                     HARDCODED_BUILDER_LABEL,
@@ -1356,7 +1375,7 @@ impl eframe::App for PolyDeskDesktop {
                                 ))
                                 .monospace()
                                 .small()
-                                .color(Color32::from_rgb(148, 163, 184)),
+                                .color(pal.text_muted),
                             )
                             .truncate(),
                         );
@@ -1377,6 +1396,7 @@ impl eframe::App for PolyDeskDesktop {
                     if let Some(act) = draw_price_ladder(
                         ui,
                         l,
+                        pal,
                         &mut self.ladder_state,
                         self.odds_fmt,
                         active_book.as_ref(),
@@ -1408,7 +1428,7 @@ impl eframe::App for PolyDeskDesktop {
 
         // 4. MODERN CENTER STAGE (Polymarket-style Hero Header + Gradient Chart + Clean Bottom Tabs)
         let center_frame = Frame::NONE
-            .fill(Color32::from_rgb(9, 12, 18))
+            .fill(pal.bg_canvas)
             .inner_margin(Margin::same(16));
 
         egui::CentralPanel::default().frame(center_frame).show(ui, |ui| {
@@ -1421,7 +1441,7 @@ impl eframe::App for PolyDeskDesktop {
                     m.question.clone()
                 };
                 ui.add(
-                    egui::Label::new(RichText::new(&title_disp).strong().size(18.5).color(Color32::from_rgb(248, 250, 252)))
+                    egui::Label::new(RichText::new(&title_disp).strong().size(18.5).color(pal.text_primary))
                         .truncate(),
                 )
                 .on_hover_text(title_tip);
@@ -1436,7 +1456,7 @@ impl eframe::App for PolyDeskDesktop {
                     .unwrap_or(0.5);
                 let first_hist = self.history.first().map(|p| p.p).unwrap_or(live_px);
                 let delta_pts = (live_px - first_hist) * 100.0;
-                let hero_col = if delta_pts >= 0.0 { Color32::from_rgb(0, 211, 149) } else { Color32::from_rgb(255, 77, 106) };
+                let hero_col = if delta_pts >= 0.0 { pal.green } else { pal.red };
 
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 10.0;
@@ -1468,14 +1488,14 @@ impl eframe::App for PolyDeskDesktop {
                             .and_then(|t| self.core.feed.get_book_view(t, 1))
                             .and_then(|b| b.mid.or(b.best_ask))
                             .or_else(|| m.outcome_prices.get(idx).copied());
-                        let col = if idx == 0 { Color32::from_rgb(0, 211, 149) } else { Color32::from_rgb(255, 77, 106) };
+                        let col = if idx == 0 { pal.green } else { pal.red };
                         let active = self.active_outcome_idx == idx;
                         let fill = if active {
-                            if idx == 0 { Color32::from_rgba_unmultiplied(0, 211, 149, 34) } else { Color32::from_rgba_unmultiplied(255, 77, 106, 34) }
+                            if idx == 0 { Color32::from_rgba_unmultiplied(16, 185, 129, if pal.light { 30 } else { 34 }) } else { Color32::from_rgba_unmultiplied(244, 63, 94, if pal.light { 26 } else { 34 }) }
                         } else {
-                            Color32::from_rgb(17, 22, 34)
+                            pal.bg_card
                         };
-                        let stroke = if active { col } else { Color32::from_rgba_unmultiplied(148, 163, 184, 24) };
+                        let stroke = if active { col } else { pal.border };
                         let disp_name = self.display_text(name);
                         let max_chars = if polydesk::translate::contains_cjk(&disp_name) { 6 } else { 10 };
                         let short_name: String = if disp_name.chars().count() > max_chars {
@@ -1554,6 +1574,7 @@ impl eframe::App for PolyDeskDesktop {
             draw_price_chart(
                 ui,
                 l,
+                pal,
                 &self.history,
                 self.chart_mode,
                 self.indicators,
@@ -1569,7 +1590,7 @@ impl eframe::App for PolyDeskDesktop {
 
             // Fixed-height Bottom Workspace Card (fills remaining height cleanly without bouncing)
             let deck_h = ui.available_height().max(120.0);
-            surface_card().show(ui, |ui| {
+            pal.surface_card().show(ui, |ui| {
                 ui.set_min_height((deck_h - 24.0).max(96.0));
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
@@ -1595,14 +1616,14 @@ impl eframe::App for PolyDeskDesktop {
                 .anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-16.0, -16.0))
                 .show(&ctx, |ui| {
                     for (txt, is_err, _) in &self.toasts {
-                        let stroke_col = if *is_err { Color32::from_rgb(244, 63, 94) } else { Color32::from_rgb(16, 185, 129) };
+                        let stroke_col = if *is_err { pal.red } else { pal.green };
                         Frame::NONE
-                            .fill(Color32::from_rgba_unmultiplied(15, 20, 30, 245))
+                            .fill(pal.tooltip_bg)
                             .stroke(Stroke::new(1.2, stroke_col))
                             .inner_margin(Margin::symmetric(12, 8))
-                            .corner_radius(CornerRadius::same(8))
+                            .corner_radius(CornerRadius::same(9))
                             .show(ui, |ui| {
-                                ui.label(RichText::new(txt).monospace().small());
+                                ui.label(RichText::new(txt).monospace().small().color(pal.tooltip_fg));
                             });
                     }
                 });
@@ -1615,6 +1636,7 @@ impl eframe::App for PolyDeskDesktop {
 impl PolyDeskDesktop {
     fn draw_bottom_deck(&mut self, ui: &mut egui::Ui, active_aid: Option<&str>) {
         let l = self.lang;
+        let pal = self.palette();
         match self.deck_tab {
             DeckTab::Positions => {
                 let positions = self.all_positions().to_vec();
@@ -1722,11 +1744,11 @@ impl PolyDeskDesktop {
                     }
                     cols[0].label(RichText::new(tr(l, "Live Trade Tape", "实时逐笔成交")).strong().small());
                     for tr_e in self.core.feed.recent_tape(active_aid, 18) {
-                        let c = if tr_e.side == "BUY" { Color32::from_rgb(16, 185, 129) } else { Color32::from_rgb(244, 63, 94) };
+                        let c = if tr_e.side == "BUY" { pal.green } else { pal.red };
                         cols[0].horizontal(|ui| {
                             ui.label(RichText::new(&tr_e.side).monospace().small().color(c));
                             ui.label(RichText::new(format_odds(Some(tr_e.price), self.odds_fmt, 0.01)).monospace().small());
-                            ui.label(RichText::new(format_usd(tr_e.notional_usd, false)).monospace().small().color(if tr_e.is_whale { Color32::from_rgb(251, 191, 36) } else { Color32::LIGHT_GRAY }));
+                            ui.label(RichText::new(format_usd(tr_e.notional_usd, false)).monospace().small().color(if tr_e.is_whale { pal.amber } else { pal.text_secondary }));
                         });
                     }
 
@@ -1780,9 +1802,9 @@ impl PolyDeskDesktop {
             DeckTab::Fees => {
                 let telem = self.core.telemetry.snapshot();
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(format!("{} · {}bp Taker / {}bp Maker", HARDCODED_BUILDER_LABEL, self.account.builder_taker_bps, self.account.builder_maker_bps)).monospace().small().color(Color32::from_rgb(56, 189, 248)));
+                    ui.label(RichText::new(format!("{} · {}bp Taker / {}bp Maker", HARDCODED_BUILDER_LABEL, self.account.builder_taker_bps, self.account.builder_maker_bps)).monospace().small().color(pal.cyan));
                     ui.label(RichText::new(format!("| {}: {}", tr(l, "Volume", "成交额"), format_usd(telem.routed_volume_usd, false))).monospace().small());
-                    ui.label(RichText::new(format!("| {}: {}", tr(l, "Terminal Fee", "终端费"), format_usd(telem.total_builder_fees_usd, false))).monospace().small().color(Color32::from_rgb(251, 191, 36)));
+                    ui.label(RichText::new(format!("| {}: {}", tr(l, "Terminal Fee", "终端费"), format_usd(telem.total_builder_fees_usd, false))).monospace().small().color(pal.amber));
                 });
                 ui.add_space(6.0);
                 for rec in telem.recent_fee_ledger.iter().take(20) {
@@ -1797,10 +1819,11 @@ impl PolyDeskDesktop {
 
     fn draw_pro_orders_panel(&mut self, ui: &mut egui::Ui) {
         let l = self.lang;
+        let pal = self.palette();
 
         // 1. Engine-Side Conditional Rules (SL / TP / Trailing / Drip)
-        surface_card().show(ui, |ui| {
-            ui.label(RichText::new(tr(l, "Conditional Exit (Rust Engine · Microsecond Trigger)", "引擎条件单（本地微秒触发）")).strong().color(Color32::from_rgb(56, 189, 248)));
+        pal.surface_card().show(ui, |ui| {
+            ui.label(RichText::new(tr(l, "Conditional Exit (Rust Engine · Microsecond Trigger)", "引擎条件单（本地微秒触发）")).strong().color(pal.cyan));
             ui.add_space(6.0);
             egui::Grid::new("adv_rule_g").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                 ui.label(tr(l, "Rule Type", "策略类型"));
@@ -1866,8 +1889,8 @@ impl PolyDeskDesktop {
         ui.add_space(10.0);
 
         // 2. Scale Entry Batch Ladder
-        surface_card().show(ui, |ui| {
-            ui.label(RichText::new(tr(l, "Scale Entry (Batch Ladder)", "区间阶梯批量挂单")).strong().color(Color32::from_rgb(56, 189, 248)));
+        pal.surface_card().show(ui, |ui| {
+            ui.label(RichText::new(tr(l, "Scale Entry (Batch Ladder)", "区间阶梯批量挂单")).strong().color(pal.cyan));
             ui.add_space(6.0);
             egui::Grid::new("scale_g").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                 ui.label(tr(l, "Side", "方向"));
@@ -1921,12 +1944,12 @@ impl PolyDeskDesktop {
         if let Some(aid) = self.active_asset_id() {
             if let Some(g) = self.core.execution.preview_green_up(aid, self.opposite_asset_id()) {
                 let g: GreenUpQuote = g;
-                surface_card().show(ui, |ui| {
-                    ui.label(RichText::new(tr(l, "Green-Up / Trade-Out", "一键锁盈策略")).strong().color(Color32::from_rgb(16, 185, 129)));
+                pal.surface_card().show(ui, |ui| {
+                    ui.label(RichText::new(tr(l, "Green-Up / Trade-Out", "一键锁盈策略")).strong().color(pal.green));
                     ui.add_space(4.0);
                     ui.label(RichText::new(format!("Cash Out: {} @ {}", format_usd(g.close_locked_pnl, true), format_odds(Some(g.close_price), self.odds_fmt, 0.01))).monospace());
                     if g.can_free_roll {
-                        ui.label(RichText::new(format!("Free-Roll: keep {:.1} risk-free shares", g.free_roll_remaining_shares)).monospace().small().color(Color32::from_rgb(16, 185, 129)));
+                        ui.label(RichText::new(format!("Free-Roll: keep {:.1} risk-free shares", g.free_roll_remaining_shares)).monospace().small().color(pal.green));
                     }
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
@@ -1940,10 +1963,10 @@ impl PolyDeskDesktop {
 
             if let Some(s) = self.core.execution.preview_sweep(aid, true, Some(self.stake_value), None, None) {
                 let s: SweepQuote = s;
-                surface_card().show(ui, |ui| {
+                pal.surface_card().show(ui, |ui| {
                     ui.label(RichText::new(format!("{} (${:.0})", tr(l, "Live Sweep Simulator", "扫盘成本预估"), self.stake_value)).strong());
                     ui.add_space(4.0);
-                    ui.label(RichText::new(format!("VWAP {} · Slip {:.0}bp · {} levels", format_odds(Some(s.vwap), self.odds_fmt, 0.01), s.slippage_bps, s.levels_consumed)).monospace().small().color(Color32::from_rgb(148, 163, 184)));
+                    ui.label(RichText::new(format!("VWAP {} · Slip {:.0}bp · {} levels", format_odds(Some(s.vwap), self.odds_fmt, 0.01), s.slippage_bps, s.levels_consumed)).monospace().small().color(pal.text_muted));
                 });
             }
         }
@@ -1952,8 +1975,10 @@ impl PolyDeskDesktop {
     /// Polymarket-style 1-Click Quick Buy / Sell Card — enter amount, see instant payout & fees, click Buy/Sell!
     fn draw_quick_trade_panel(&mut self, ui: &mut egui::Ui, active_book: Option<&polydesk::book::BookView>) {
         let l = self.lang;
+        let pal = self.palette();
+        let sh_unit = tr(l, "shares", "份");
         let Some(m) = self.active_market.clone() else {
-            ui.label(RichText::new(tr(l, "Select any market on the left to start trading.", "请在左侧选择任意市场开始交易。")).color(Color32::from_rgb(148, 163, 184)));
+            ui.label(RichText::new(tr(l, "Select any market on the left to start trading.", "请在左侧选择任意市场开始交易。")).color(pal.text_muted));
             return;
         };
 
@@ -1962,15 +1987,15 @@ impl PolyDeskDesktop {
         let active_pos = self.active_position().cloned();
         let avail_shares = active_pos.as_ref().map(|p| p.shares).unwrap_or(0.0);
 
-        surface_card().show(ui, |ui| {
+        pal.surface_card().show(ui, |ui| {
             ui.set_width(ui.available_width());
 
-            // 1. Big Buy / Sell Segmented Switcher + Market / Limit Toggle
+            // 1. Big Buy / Sell Segmented Switcher
             ui.horizontal(|ui| {
                 let half_w = ((ui.available_width() - 8.0) * 0.5).max(120.0);
-                let buy_fill = if self.quick_buy { Color32::from_rgba_unmultiplied(0, 211, 149, 36) } else { Color32::from_rgb(22, 29, 44) };
-                let buy_stroke = if self.quick_buy { Color32::from_rgb(0, 211, 149) } else { Color32::from_rgba_unmultiplied(148, 163, 184, 24) };
-                let buy_col = if self.quick_buy { Color32::from_rgb(0, 211, 149) } else { Color32::from_rgb(148, 163, 184) };
+                let buy_fill = if self.quick_buy { Color32::from_rgba_unmultiplied(16, 185, 129, if pal.light { 28 } else { 36 }) } else { pal.bg_chip };
+                let buy_stroke = if self.quick_buy { pal.green } else { pal.border };
+                let buy_col = if self.quick_buy { pal.green } else { pal.text_muted };
                 if ui.add_sized(
                     Vec2::new(half_w, 34.0),
                     egui::Button::new(RichText::new(tr(l, "Buy", "买入")).strong().size(14.0).color(buy_col))
@@ -1981,9 +2006,9 @@ impl PolyDeskDesktop {
                     self.quick_buy = true;
                 }
 
-                let sell_fill = if !self.quick_buy { Color32::from_rgba_unmultiplied(255, 77, 106, 36) } else { Color32::from_rgb(22, 29, 44) };
-                let sell_stroke = if !self.quick_buy { Color32::from_rgb(255, 77, 106) } else { Color32::from_rgba_unmultiplied(148, 163, 184, 24) };
-                let sell_col = if !self.quick_buy { Color32::from_rgb(255, 77, 106) } else { Color32::from_rgb(148, 163, 184) };
+                let sell_fill = if !self.quick_buy { Color32::from_rgba_unmultiplied(244, 63, 94, if pal.light { 24 } else { 36 }) } else { pal.bg_chip };
+                let sell_stroke = if !self.quick_buy { pal.red } else { pal.border };
+                let sell_col = if !self.quick_buy { pal.red } else { pal.text_muted };
                 if ui.add_sized(
                     Vec2::new(half_w, 34.0),
                     egui::Button::new(RichText::new(tr(l, "Sell", "卖出")).strong().size(14.0).color(sell_col))
@@ -1999,7 +2024,7 @@ impl PolyDeskDesktop {
 
             // 2. Order Type Pill: Market vs Limit
             ui.horizontal(|ui| {
-                ui.label(RichText::new(tr(l, "Order Type", "订单类型")).small().color(Color32::from_rgb(138, 154, 178)));
+                ui.label(RichText::new(tr(l, "Order Type", "订单类型")).small().color(pal.text_muted));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.selectable_label(self.quick_limit_mode, RichText::new(tr(l, "Limit", "限价单")).small()).clicked() {
                         self.quick_limit_mode = true;
@@ -2015,8 +2040,8 @@ impl PolyDeskDesktop {
 
             ui.add_space(10.0);
 
-            // 3. Big Side-by-Side Outcome Cards (Yes / No or Team A / Team B)
-            ui.label(RichText::new(tr(l, "Outcome", "选择方向")).small().color(Color32::from_rgb(138, 154, 178)));
+            // 3. Big Side-by-Side Outcome Cards
+            ui.label(RichText::new(tr(l, "Outcome", "选择方向")).small().color(pal.text_muted));
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 let n = m.outcomes.len().clamp(1, 2);
@@ -2028,13 +2053,13 @@ impl PolyDeskDesktop {
                         .and_then(|b| if self.quick_buy { b.best_ask.or(b.mid) } else { b.best_bid.or(b.mid) })
                         .or_else(|| m.outcome_prices.get(idx).copied());
                     let active = self.active_outcome_idx == idx;
-                    let col = if idx == 0 { Color32::from_rgb(0, 211, 149) } else { Color32::from_rgb(255, 77, 106) };
+                    let col = if idx == 0 { pal.green } else { pal.red };
                     let fill = if active {
-                        if idx == 0 { Color32::from_rgba_unmultiplied(0, 211, 149, 42) } else { Color32::from_rgba_unmultiplied(255, 77, 106, 42) }
+                        if idx == 0 { Color32::from_rgba_unmultiplied(16, 185, 129, if pal.light { 30 } else { 42 }) } else { Color32::from_rgba_unmultiplied(244, 63, 94, if pal.light { 26 } else { 42 }) }
                     } else {
-                        Color32::from_rgb(22, 29, 44)
+                        pal.bg_chip
                     };
-                    let stroke = if active { col } else { Color32::from_rgba_unmultiplied(148, 163, 184, 24) };
+                    let stroke = if active { col } else { pal.border };
                     let disp_name = self.display_text(name);
                     let max_c = if polydesk::translate::contains_cjk(&disp_name) { 7 } else { 12 };
                     let short: String = if disp_name.chars().count() > max_c {
@@ -2045,7 +2070,7 @@ impl PolyDeskDesktop {
                     let lbl = format!("{short}\n{}", format_odds(px, self.odds_fmt, m.tick_size));
                     if ui.add_sized(
                         Vec2::new(btn_w, 48.0),
-                        egui::Button::new(RichText::new(lbl).monospace().strong().size(13.0).color(if active { col } else { Color32::from_rgb(226, 232, 240) }))
+                        egui::Button::new(RichText::new(lbl).monospace().strong().size(13.0).color(if active { col } else { pal.text_primary }))
                             .fill(fill)
                             .stroke(Stroke::new(if active { 1.5 } else { 1.0 }, stroke))
                             .corner_radius(CornerRadius::same(10)),
@@ -2064,10 +2089,10 @@ impl PolyDeskDesktop {
 
             ui.add_space(12.0);
 
-            // 4. Optional Limit Price Stepper (when Limit mode is selected)
+            // 4. Optional Limit Price Stepper
             if self.quick_limit_mode {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(tr(l, "Limit Price", "限价价格")).small().color(Color32::from_rgb(138, 154, 178)));
+                    ui.label(RichText::new(tr(l, "Limit Price", "限价价格")).small().color(pal.text_muted));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let step_c = (m.tick_size * 100.0).max(0.1);
                         if ui.button(" + ").clicked() {
@@ -2092,12 +2117,12 @@ impl PolyDeskDesktop {
                 if self.quick_buy {
                     ui.label(RichText::new(tr(l, "Amount (USD)", "买入金额 ($)")).strong().size(13.0));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(format!("{}: {}", tr(l, "Balance", "可用"), format_usd(cash, false))).monospace().small().color(Color32::from_rgb(138, 154, 178)));
+                        ui.label(RichText::new(format!("{}: {}", tr(l, "Balance", "可用"), format_usd(cash, false))).monospace().small().color(pal.text_muted));
                     });
                 } else {
-                    ui.label(RichText::new(tr(l, "Shares to Sell", "卖出份数")).strong().size(13.0));
+                    ui.label(RichText::new(tr(l, "Shares to Sell (1 share = $1 if wins)", "卖出份数 (每份赢了赔 $1)")).strong().size(12.5));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(format!("{}: {:.2} sh", tr(l, "Owned", "持仓"), avail_shares)).monospace().small().color(Color32::from_rgb(138, 154, 178)));
+                        ui.label(RichText::new(format!("{}: {:.2} {}", tr(l, "Owned", "持仓"), avail_shares, sh_unit)).monospace().small().color(pal.text_muted));
                     });
                 }
             });
@@ -2121,7 +2146,7 @@ impl PolyDeskDesktop {
                         if ui.add_sized(
                             Vec2::new(chip_w, 28.0),
                             egui::Button::new(RichText::new(format!("+${add_v:.0}")).monospace().small())
-                                .fill(Color32::from_rgb(24, 32, 49))
+                                .fill(pal.bg_chip)
                                 .corner_radius(CornerRadius::same(7)),
                         ).clicked() {
                             let next = (parsed_amt + add_v).min(100_000.0);
@@ -2130,8 +2155,8 @@ impl PolyDeskDesktop {
                     }
                     if ui.add_sized(
                         Vec2::new(chip_w, 28.0),
-                        egui::Button::new(RichText::new("Max").monospace().small().color(Color32::from_rgb(56, 189, 248)))
-                            .fill(Color32::from_rgb(24, 32, 49))
+                        egui::Button::new(RichText::new("Max").monospace().small().color(pal.blue))
+                            .fill(pal.bg_chip)
                             .corner_radius(CornerRadius::same(7)),
                     ).clicked() {
                         self.quick_amount_input = format!("{:.2}", cash.floor().max(0.0));
@@ -2142,7 +2167,7 @@ impl PolyDeskDesktop {
                         if ui.add_sized(
                             Vec2::new(chip_w, 28.0),
                             egui::Button::new(RichText::new(lbl).monospace().small())
-                                .fill(Color32::from_rgb(24, 32, 49))
+                                .fill(pal.bg_chip)
                                 .corner_radius(CornerRadius::same(7)),
                         ).clicked() {
                             self.quick_amount_input = format!("{:.2}", avail_shares * pct);
@@ -2188,27 +2213,27 @@ impl PolyDeskDesktop {
             let roi_pct = if self.quick_buy && est_usd > 0.01 { (net_profit / est_usd) * 100.0 } else { 0.0 };
 
             Frame::NONE
-                .fill(Color32::from_rgb(13, 18, 29))
-                .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(148, 163, 184, 18)))
+                .fill(pal.bg_sub)
+                .stroke(Stroke::new(1.0, pal.border))
                 .corner_radius(CornerRadius::same(10))
                 .inner_margin(Margin::same(12))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(tr(l, "Avg Price", "预计均价")).small().color(Color32::from_rgb(138, 154, 178)));
+                        ui.label(RichText::new(tr(l, "Avg Price", "预计均价")).small().color(pal.text_muted));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(RichText::new(format_odds(Some(exec_px), self.odds_fmt, m.tick_size)).monospace().strong());
                         });
                     });
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(tr(l, "Shares", "预计份数")).small().color(Color32::from_rgb(138, 154, 178)));
+                        ui.label(RichText::new(tr(l, "Shares", "预计份数")).small().color(pal.text_muted));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new(format!("{:.2}", est_shares)).monospace().strong());
+                            ui.label(RichText::new(format!("{:.2} {}", est_shares, sh_unit)).monospace().strong());
                         });
                     });
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(format!("{} ({} {}bp)", tr(l, "Fees", "费率"), HARDCODED_BUILDER_LABEL, b_bps)).small().color(Color32::from_rgb(138, 154, 178)));
+                        ui.label(RichText::new(format!("{} ({} {}bp)", tr(l, "Fees", "费率"), HARDCODED_BUILDER_LABEL, b_bps)).small().color(pal.text_muted));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new(format_usd(p_fee + b_fee, false)).monospace().small().color(Color32::from_rgb(148, 163, 184)));
+                            ui.label(RichText::new(format_usd(p_fee + b_fee, false)).monospace().small().color(pal.text_muted));
                         });
                     });
                     ui.separator();
@@ -2222,7 +2247,7 @@ impl PolyDeskDesktop {
                                         .monospace()
                                         .strong()
                                         .size(15.0)
-                                        .color(Color32::from_rgb(0, 211, 149)),
+                                        .color(pal.green),
                                 );
                             } else {
                                 ui.label(
@@ -2230,7 +2255,7 @@ impl PolyDeskDesktop {
                                         .monospace()
                                         .strong()
                                         .size(15.0)
-                                        .color(Color32::from_rgb(248, 250, 252)),
+                                        .color(pal.text_primary),
                                 );
                             }
                         });
@@ -2244,10 +2269,14 @@ impl PolyDeskDesktop {
             let action_lbl = if self.quick_buy {
                 format!("{} {} · {}", tr(l, "Buy", "立即买入"), out_disp, format_usd(est_usd, false))
             } else {
-                format!("{} {} · {:.1} sh", tr(l, "Sell", "立即卖出"), out_disp, est_shares)
+                format!("{} {} · {:.1} {}", tr(l, "Sell", "立即卖出"), out_disp, est_shares, sh_unit)
             };
-            let btn_bg = if self.quick_buy { Color32::from_rgb(0, 198, 140) } else { Color32::from_rgb(244, 63, 94) };
-            let btn_txt = if self.quick_buy { Color32::from_rgb(6, 16, 14) } else { Color32::WHITE };
+            let btn_bg = if self.quick_buy {
+                if pal.light { Color32::from_rgb(5, 150, 105) } else { Color32::from_rgb(0, 198, 140) }
+            } else {
+                pal.red
+            };
+            let btn_txt = if self.quick_buy && !pal.light { Color32::from_rgb(6, 16, 14) } else { Color32::WHITE };
 
             if ui.add_sized(
                 Vec2::new(ui.available_width(), 44.0),
@@ -2271,8 +2300,8 @@ impl PolyDeskDesktop {
             ui.add_space(10.0);
             let mk = active_book.and_then(|b| b.best_bid.or(b.mid)).unwrap_or(pos.avg_entry);
             let upnl = pos.shares * (mk - pos.avg_entry);
-            let pcol = if upnl >= 0.0 { Color32::from_rgb(0, 211, 149) } else { Color32::from_rgb(255, 77, 106) };
-            surface_card().show(ui, |ui| {
+            let pcol = if upnl >= 0.0 { pal.green } else { pal.red };
+            pal.surface_card().show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(tr(l, "Your Position", "当前持仓")).strong().size(13.0));
@@ -2283,19 +2312,20 @@ impl PolyDeskDesktop {
                 ui.add_space(4.0);
                 ui.label(
                     RichText::new(format!(
-                        "{} · {:.2} sh @ {} -> {}",
+                        "{} · {:.2} {} @ {} -> {}",
                         self.display_text(&pos.outcome),
                         pos.shares,
+                        sh_unit,
                         format_odds(Some(pos.avg_entry), self.odds_fmt, 0.01),
                         format_odds(Some(mk), self.odds_fmt, 0.01)
                     ))
                     .monospace()
                     .small()
-                    .color(Color32::from_rgb(148, 163, 184)),
+                    .color(pal.text_muted),
                 );
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button(RichText::new(tr(l, "Cash Out All", "一键全部卖出锁盈")).strong().color(Color32::from_rgb(251, 191, 36))).clicked() {
+                    if ui.button(RichText::new(tr(l, "Cash Out All", "一键全部卖出锁盈")).strong().color(pal.amber)).clicked() {
                         self.trigger_green_up("close");
                     }
                     if ui.button(tr(l, "Free-Roll", "抽本留利润")).clicked() {
@@ -2305,47 +2335,6 @@ impl PolyDeskDesktop {
             });
         }
     }
-}
-
-fn install_modern_theme(ctx: &Context) {
-    let mut style = (*ctx.global_style()).clone();
-    style.spacing.item_spacing = Vec2::new(8.0, 8.0);
-    style.spacing.button_padding = Vec2::new(11.0, 6.5);
-    style.spacing.window_margin = Margin::same(16);
-    style.spacing.scroll.bar_width = 6.0;
-
-    let mut v = egui::Visuals::dark();
-    v.panel_fill = Color32::from_rgb(9, 12, 18);
-    v.window_fill = Color32::from_rgb(15, 20, 31);
-    v.extreme_bg_color = Color32::from_rgb(10, 14, 23);
-    v.window_corner_radius = CornerRadius::same(14);
-    v.window_stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(148, 163, 184, 38));
-
-    v.widgets.noninteractive.bg_fill = Color32::from_rgb(17, 22, 34);
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(148, 163, 184, 22));
-    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(203, 213, 225));
-    v.widgets.noninteractive.corner_radius = CornerRadius::same(9);
-
-    v.widgets.inactive.bg_fill = Color32::from_rgb(22, 29, 44);
-    v.widgets.inactive.weak_bg_fill = Color32::from_rgb(19, 25, 39);
-    v.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(148, 163, 184, 24));
-    v.widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(230, 236, 245));
-    v.widgets.inactive.corner_radius = CornerRadius::same(9);
-
-    v.widgets.hovered.bg_fill = Color32::from_rgb(30, 40, 60);
-    v.widgets.hovered.weak_bg_fill = Color32::from_rgb(27, 36, 54);
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(56, 189, 248));
-    v.widgets.hovered.corner_radius = CornerRadius::same(9);
-
-    v.widgets.active.bg_fill = Color32::from_rgb(37, 50, 76);
-    v.widgets.active.bg_stroke = Stroke::new(1.0, Color32::from_rgb(46, 124, 246));
-    v.widgets.active.corner_radius = CornerRadius::same(9);
-
-    v.selection.bg_fill = Color32::from_rgba_unmultiplied(46, 124, 246, 48);
-    v.selection.stroke = Stroke::new(1.0, Color32::from_rgb(56, 189, 248));
-
-    style.visuals = v;
-    ctx.set_global_style(style);
 }
 
 fn install_cjk_fonts(ctx: &Context) {

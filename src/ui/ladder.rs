@@ -8,6 +8,8 @@ use polydesk::i18n::{Lang, tr};
 use polydesk::odds::{OddsFormat, format_odds, format_size, format_usd};
 use polydesk::paper::{PaperOrder, PaperPosition};
 
+use super::theme::ThemePalette;
+
 pub enum LadderAction {
     PlaceOrder { side: &'static str, price: f64, post_only_override: bool },
     CancelLevel { side: &'static str, price: f64 },
@@ -51,6 +53,7 @@ impl LadderState {
 pub fn draw_price_ladder(
     ui: &mut Ui,
     lang: Lang,
+    pal: ThemePalette,
     state: &mut LadderState,
     odds_fmt: OddsFormat,
     book: Option<&BookView>,
@@ -89,11 +92,11 @@ pub fn draw_price_ladder(
     }
 
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, CornerRadius::same(8), Color32::from_rgb(11, 15, 23));
+    painter.rect_filled(rect, CornerRadius::same(10), pal.bg_card);
     painter.rect_stroke(
         rect,
-        CornerRadius::same(8),
-        Stroke::new(1.0, Color32::from_rgb(31, 41, 55)),
+        CornerRadius::same(10),
+        Stroke::new(1.0, pal.border),
         egui::StrokeKind::Inside,
     );
 
@@ -116,10 +119,10 @@ pub fn draw_price_ladder(
     let hdr_rect = Rect::from_min_max(pos2(x0 + 1.0, rect.top() + 1.0), pos2(x6 - 1.0, rect.top() + hdr_h));
     painter.rect_filled(
         hdr_rect,
-        CornerRadius { nw: 7, ne: 7, sw: 0, se: 0 },
-        Color32::from_rgb(20, 27, 40),
+        CornerRadius { nw: 9, ne: 9, sw: 0, se: 0 },
+        pal.ladder_hdr_bg,
     );
-    let hdr_col = Color32::from_rgb(138, 154, 178);
+    let hdr_col = pal.text_muted;
     let hdr_font = FontId::proportional(11.0);
     let hdr_y = hdr_rect.center().y;
     painter.text(pos2((x0 + x1) * 0.5, hdr_y), Align2::CENTER_CENTER, tr(lang, "MyB", "买挂"), hdr_font.clone(), hdr_col);
@@ -187,10 +190,10 @@ pub fn draw_price_ladder(
     let mut action: Option<LadderAction> = None;
     let mono = FontId::monospace(11.5);
     let mono_sm = FontId::monospace(10.0);
-    let row_sep = Stroke::new(0.5, Color32::from_rgba_unmultiplied(31, 41, 55, 110));
-    let px_bg = Color32::from_rgb(18, 24, 36);
-    let bid_bar = Color32::from_rgba_unmultiplied(16, 185, 129, 54);
-    let ask_bar = Color32::from_rgba_unmultiplied(244, 63, 94, 54);
+    let row_sep = Stroke::new(0.5, pal.grid_line);
+    let px_bg = pal.px_col_bg;
+    let bid_bar = Color32::from_rgba_unmultiplied(16, 185, 129, if pal.light { 38 } else { 54 });
+    let ask_bar = Color32::from_rgba_unmultiplied(244, 63, 94, if pal.light { 34 } else { 54 });
 
     for i in 0..visible_rows {
         let k = center_k + (half - i as isize);
@@ -249,7 +252,7 @@ pub fn draw_price_ladder(
                 3.0,
                 bid_bar,
             );
-            painter.text(pos2(r_bid.right() - 7.0, y_mid), Align2::RIGHT_CENTER, format_size(bsz), mono.clone(), Color32::from_rgb(167, 243, 208));
+            painter.text(pos2(r_bid.right() - 7.0, y_mid), Align2::RIGHT_CENTER, format_size(bsz), mono.clone(), pal.green_text);
         }
 
         if let Some(&asz) = ask_map.get(&k) && asz > 0.0 {
@@ -259,15 +262,15 @@ pub fn draw_price_ladder(
                 3.0,
                 ask_bar,
             );
-            painter.text(pos2(r_ask.left() + 7.0, y_mid), Align2::LEFT_CENTER, format_size(asz), mono.clone(), Color32::from_rgb(254, 205, 211));
+            painter.text(pos2(r_ask.left() + 7.0, y_mid), Align2::LEFT_CENTER, format_size(asz), mono.clone(), pal.red_text);
         }
 
         let px_fill = if avg_k == Some(k) { Color32::from_rgba_unmultiplied(56, 189, 248, 52) } else { px_bg };
         painter.rect_filled(r_px, 0.0, px_fill);
         if last_k == Some(k) {
-            painter.rect_stroke(r_px.shrink(1.0), 3.0, Stroke::new(1.2, Color32::from_rgb(56, 189, 248)), egui::StrokeKind::Inside);
+            painter.rect_stroke(r_px.shrink(1.0), 3.0, Stroke::new(1.3, pal.blue), egui::StrokeKind::Inside);
         }
-        painter.text(r_px.center(), Align2::CENTER_CENTER, format_odds(Some(p), odds_fmt, step), mono.clone(), Color32::from_rgb(241, 245, 249));
+        painter.text(r_px.center(), Align2::CENTER_CENTER, format_odds(Some(p), odds_fmt, step), mono.clone(), pal.text_primary);
 
         if let Some(&(tag, tcol)) = rule_tags.get(&k) {
             let b = Rect::from_min_max(pos2(r_px.right() - 25.0, y_top + 4.0), pos2(r_px.right() - 2.0, y_bot - 4.0));

@@ -45,7 +45,7 @@ struct WalletDepositSheet: View {
                         if let phrase = w.mnemonic {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(engine.t("12-Word Secret Phrase", "12 词助记词")).font(.caption2).foregroundColor(.secondary)
-                                Text(phrase).font(.caption.monospaced()).foregroundColor(.yellow)
+                                Text(phrase).font(.caption.monospaced().bold()).foregroundColor(.orange)
                                 Button(engine.t("Copy 12-Word Phrase", "复制 12 词助记词")) {
                                     UIPasteboard.general.string = phrase
                                     engine.showToast(engine.t("Copied secret phrase", "已复制助记词"))

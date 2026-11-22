@@ -7,6 +7,8 @@ use polydesk::market::PricePoint;
 use polydesk::odds::{OddsFormat, format_odds};
 use polydesk::paper::PaperPosition;
 
+use super::theme::ThemePalette;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChartMode {
     Line,
@@ -46,6 +48,7 @@ struct Candle {
 pub fn draw_price_chart(
     ui: &mut Ui,
     lang: Lang,
+    pal: ThemePalette,
     points: &[PricePoint],
     mode: ChartMode,
     indicators: IndicatorConfig,
@@ -60,12 +63,12 @@ pub fn draw_price_chart(
     let (rect, response) = ui.allocate_exact_size(desired, Sense::hover());
     let painter = ui.painter_at(rect);
 
-    // Modern deep elevated card surface
-    painter.rect_filled(rect, CornerRadius::same(12), Color32::from_rgb(15, 20, 31));
+    // Modern adaptive card surface (Light or Dark!)
+    painter.rect_filled(rect, CornerRadius::same(12), pal.bg_card);
     painter.rect_stroke(
         rect,
         CornerRadius::same(12),
-        Stroke::new(1.0, Color32::from_rgba_unmultiplied(148, 163, 184, 24)),
+        Stroke::new(1.0, pal.border),
         egui::StrokeKind::Inside,
     );
 
@@ -148,8 +151,8 @@ pub fn draw_price_chart(
     };
 
     // Subtle hairline horizontal gridlines & clean right Y-axis
-    let grid_col = Color32::from_rgba_unmultiplied(148, 163, 184, 16);
-    let label_col = Color32::from_rgb(108, 125, 150);
+    let grid_col = pal.grid_line;
+    let label_col = pal.text_muted;
     for i in 0..=4 {
         let frac = i as f64 / 4.0;
         let y = plot.top() + (frac as f32) * plot.height();
@@ -202,8 +205,8 @@ pub fn draw_price_chart(
         }
     }
 
-    let up_col = Color32::from_rgb(0, 211, 149);
-    let dn_col = Color32::from_rgb(255, 77, 106);
+    let up_col = pal.green;
+    let dn_col = pal.red;
     let first_p = prices[0];
     let last_p = *prices.last().unwrap_or(&0.5);
     let is_up = last_p >= first_p;
@@ -218,16 +221,9 @@ pub fn draw_price_chart(
 
             // Smooth GPU hardware-interpolated vertical gradient fill under the line!
             if poly.len() >= 2 {
-                let top_fill = if is_up {
-                    Color32::from_rgba_unmultiplied(0, 211, 149, 44)
-                } else {
-                    Color32::from_rgba_unmultiplied(255, 77, 106, 44)
-                };
-                let bot_fill = if is_up {
-                    Color32::from_rgba_unmultiplied(0, 211, 149, 0)
-                } else {
-                    Color32::from_rgba_unmultiplied(255, 77, 106, 0)
-                };
+                let top_alpha = if pal.light { 50 } else { 44 };
+                let top_fill = Color32::from_rgba_unmultiplied(trend_col.r(), trend_col.g(), trend_col.b(), top_alpha);
+                let bot_fill = Color32::from_rgba_unmultiplied(trend_col.r(), trend_col.g(), trend_col.b(), 0);
 
                 let mut mesh = Mesh::default();
                 for (i, &pt) in poly.iter().enumerate() {
@@ -245,11 +241,7 @@ pub fn draw_price_chart(
                 painter.add(Shape::mesh(mesh));
 
                 // Soft subtle glow stroke underneath main line
-                let glow_col = if is_up {
-                    Color32::from_rgba_unmultiplied(0, 211, 149, 45)
-                } else {
-                    Color32::from_rgba_unmultiplied(255, 77, 106, 45)
-                };
+                let glow_col = Color32::from_rgba_unmultiplied(trend_col.r(), trend_col.g(), trend_col.b(), if pal.light { 36 } else { 45 });
                 painter.add(Shape::line(poly.clone(), Stroke::new(4.5, glow_col)));
                 painter.add(Shape::line(poly.clone(), Stroke::new(2.0, trend_col)));
 
@@ -257,7 +249,7 @@ pub fn draw_price_chart(
                 if let Some(&last_pt) = poly.last() {
                     painter.circle_filled(last_pt, 7.5, glow_col);
                     painter.circle_filled(last_pt, 3.8, trend_col);
-                    painter.circle_stroke(last_pt, 3.8, Stroke::new(1.2, Color32::from_rgb(248, 250, 252)));
+                    painter.circle_stroke(last_pt, 3.8, Stroke::new(1.4, pal.bg_card));
                 }
             }
         }
@@ -345,7 +337,8 @@ pub fn draw_price_chart(
         }
         let badge = Rect::from_min_max(pos2(plot.right() + 4.0, y - 9.0), pos2(rect.right() - 4.0, y + 9.0));
         painter.rect_filled(badge, CornerRadius::same(5), col);
-        painter.text(badge.center(), egui::Align2::CENTER_CENTER, tag, FontId::monospace(9.5), Color32::from_rgb(8, 11, 16));
+        let pill_txt = if pal.light { Color32::WHITE } else { Color32::from_rgb(8, 11, 16) };
+        painter.text(badge.center(), egui::Align2::CENTER_CENTER, tag, FontId::monospace(9.5), pill_txt);
     };
 
     if let Some(pos) = position
@@ -370,8 +363,8 @@ pub fn draw_price_chart(
             pos2(plot.left(), plot.bottom() + rsi_gap),
             pos2(plot.right(), rect.bottom() - pad_b),
         );
-        painter.rect_filled(r_rect, 6.0, Color32::from_rgb(10, 14, 22));
-        painter.rect_stroke(r_rect, 6.0, Stroke::new(0.8, Color32::from_rgba_unmultiplied(148, 163, 184, 24)), egui::StrokeKind::Inside);
+        painter.rect_filled(r_rect, 6.0, pal.bg_sub);
+        painter.rect_stroke(r_rect, 6.0, Stroke::new(0.8, pal.border), egui::StrokeKind::Inside);
 
         let y_rsi = |v: f64| r_rect.top() + (((100.0 - v.clamp(0.0, 100.0)) / 100.0) as f32) * r_rect.height();
         let y70 = y_rsi(70.0);
@@ -435,11 +428,15 @@ pub fn draw_price_chart(
         let cx = x_of_t(pt.t);
         let cy = y_of(pt.p);
 
-        let cross_col = Color32::from_rgba_unmultiplied(226, 232, 240, 60);
+        let cross_col = if pal.light {
+            Color32::from_rgba_unmultiplied(15, 23, 42, 68)
+        } else {
+            Color32::from_rgba_unmultiplied(226, 232, 240, 60)
+        };
         painter.line_segment([pos2(cx, plot.top()), pos2(cx, rect.bottom() - pad_b)], Stroke::new(1.0, cross_col));
         painter.line_segment([pos2(plot.left(), cy), pos2(plot.right(), cy)], Stroke::new(1.0, cross_col));
         painter.circle_filled(pos2(cx, cy), 4.2, trend_col);
-        painter.circle_stroke(pos2(cx, cy), 4.2, Stroke::new(1.5, Color32::WHITE));
+        painter.circle_stroke(pos2(cx, cy), 4.2, Stroke::new(1.5, pal.bg_card));
 
         let tm = chrono::DateTime::from_timestamp(pt.t, 0)
             .map(|d| d.with_timezone(&chrono::Local).format("%m/%d %H:%M").to_string())
@@ -448,9 +445,9 @@ pub fn draw_price_chart(
         let bx = (cx + 10.0).min(plot.right() - 144.0).max(plot.left() + 6.0);
         let by = (cy - 28.0).max(plot.top() + 6.0);
         let tip_rect = Rect::from_min_size(pos2(bx, by), vec2(138.0, 22.0));
-        painter.rect_filled(tip_rect, CornerRadius::same(6), Color32::from_rgba_unmultiplied(15, 23, 42, 242));
-        painter.rect_stroke(tip_rect, CornerRadius::same(6), Stroke::new(1.0, Color32::from_rgba_unmultiplied(148, 163, 184, 70)), egui::StrokeKind::Inside);
-        painter.text(tip_rect.center(), egui::Align2::CENTER_CENTER, tip, FontId::monospace(10.0), Color32::from_rgb(241, 245, 249));
+        painter.rect_filled(tip_rect, CornerRadius::same(6), pal.tooltip_bg);
+        painter.rect_stroke(tip_rect, CornerRadius::same(6), Stroke::new(1.0, pal.border_strong), egui::StrokeKind::Inside);
+        painter.text(tip_rect.center(), egui::Align2::CENTER_CENTER, tip, FontId::monospace(10.0), pal.tooltip_fg);
     }
 }
 

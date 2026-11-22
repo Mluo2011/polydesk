@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ChartView: View {
     @ObservedObject var engine: EngineBridge
+    @Environment(\.colorScheme) private var scheme
     @State private var showCandles = false
     @State private var showEma = false
     @State private var showSma = false
@@ -35,7 +36,7 @@ struct ChartView: View {
                         }
                         .font(.caption2.monospaced())
                         .padding(.horizontal, 6).padding(.vertical, 4)
-                        .background(engine.chartInterval == iv ? Color.cyan.opacity(0.25) : Color.white.opacity(0.05))
+                        .background(engine.chartInterval == iv ? Color.blue.opacity(0.22) : (scheme == .light ? Color.black.opacity(0.05) : Color.white.opacity(0.05)))
                         .cornerRadius(5)
                     }
                 }
@@ -43,7 +44,8 @@ struct ChartView: View {
 
             Canvas { ctx, size in
                 let bg = Path(CGRect(origin: .zero, size: size))
-                ctx.fill(bg, with: .color(Color(red: 0.05, green: 0.07, blue: 0.11)))
+                let bgCol = scheme == .light ? Color.white : Color(red: 0.067, green: 0.086, blue: 0.133)
+                ctx.fill(bg, with: .color(bgCol))
 
                 let pts = engine.history
                 guard pts.count >= 2 else { return }
@@ -153,7 +155,7 @@ struct ChartView: View {
                         ctx.stroke(path, with: .color(lineCol), lineWidth: 2.2)
                         let dot = CGRect(x: lastPt.x - 4, y: lastPt.y - 4, width: 8, height: 8)
                         ctx.fill(Path(ellipseIn: dot), with: .color(lineCol))
-                        ctx.stroke(Path(ellipseIn: dot), with: .color(.white), lineWidth: 1.2)
+                        ctx.stroke(Path(ellipseIn: dot), with: .color(scheme == .light ? Color.white : Color(red: 0.067, green: 0.086, blue: 0.133)), lineWidth: 1.5)
                     }
                 }
 
@@ -234,7 +236,7 @@ struct ChartView: View {
                     ctx.stroke(rp, with: .color(.orange), lineWidth: 1.3)
                 }
             }
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.white.opacity(0.08), lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(scheme == .light ? Color.black.opacity(0.10) : Color.white.opacity(0.08), lineWidth: 1))
             .cornerRadius(10)
             .transaction { $0.animation = nil }
         }
