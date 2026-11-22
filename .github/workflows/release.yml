@@ -50,12 +50,18 @@ jobs:
           mkdir -p release-artifacts
           cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "release-artifacts/${{ matrix.asset }}"
           if [[ "${{ matrix.asset }}" == "polydesk-windows-x86_64.exe" ]]; then
-            mkdir -p win-pkg/PolyDesk-Windows
-            cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "win-pkg/PolyDesk-Windows/PolyDesk-Windows-x64.exe"
-            cp packaging/Install-PolyDesk-Windows.bat "win-pkg/PolyDesk-Windows/"
-            cp assets/polydesk.ico "win-pkg/PolyDesk-Windows/"
-            cp packaging/PolyDesk-中文使用指南.html "win-pkg/PolyDesk-Windows/"
-            (cd win-pkg && 7z a -tzip ../release-artifacts/PolyDesk-Windows-x64-Installer.zip PolyDesk-Windows)
+            ISCC=""
+            if command -v iscc >/dev/null 2>&1; then
+              ISCC="iscc"
+            elif [[ -x "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" ]]; then
+              ISCC="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+            else
+              choco install innosetup -y --no-progress
+              ISCC="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+            fi
+            VER="${GITHUB_REF_NAME#v}"
+            if [[ -z "$VER" || "$VER" == "main" ]]; then VER="0.2.1"; fi
+            "$ISCC" "/DMyAppVersion=$VER" packaging/polydesk.iss
           fi
 
       - uses: actions/upload-artifact@v4
