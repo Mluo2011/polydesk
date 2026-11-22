@@ -23,6 +23,7 @@ use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tracing::info;
+use zeroize::Zeroize;
 
 use crate::book::{
     calculate_green_up, estimate_builder_fee_usd, estimate_protocol_fee_usd, GreenUpQuote,
@@ -394,10 +395,11 @@ impl ExecutionEngine {
     /// and immediately fetch direct USDT/USDC Polymarket Bridge deposit addresses for it.
     pub async fn create_and_unlock_new_wallet(
         &self,
-        password: String,
+        mut password: String,
         persist_vault: bool,
     ) -> Result<(GeneratedWallet, AccountState, Option<DepositAddressesInfo>)> {
         if persist_vault && password.len() < 6 {
+            password.zeroize();
             return Err(anyhow!("Vault passphrase must be at least 6 characters"));
         }
         let generated = generate_local_wallet()?;
@@ -418,7 +420,11 @@ impl ExecutionEngine {
                 signature_type: WalletSignatureType::Eoa,
                 label: Some("Local Generated".into()),
             };
-            save_encrypted_vault(&self.vault_path, &password, &secret, &hint)?;
+            let save_res = save_encrypted_vault(&self.vault_path, &password, &secret, &hint);
+            password.zeroize();
+            save_res?;
+        } else {
+            password.zeroize();
         }
 
         self.authenticate_live(signer, None, WalletSignatureType::Eoa)
@@ -443,16 +449,25 @@ impl ExecutionEngine {
 
     pub async fn save_and_unlock_wallet(
         &self,
-        private_key_or_phrase: String,
+        mut private_key_or_phrase: String,
         funder: Option<String>,
         signature_type: WalletSignatureType,
-        password: String,
+        mut password: String,
         persist_vault: bool,
     ) -> Result<AccountState> {
-        let (pk_clean, mnemonic_opt) = parse_key_or_mnemonic(&private_key_or_phrase)?;
-        let signer = PrivateKeySigner::from_str(&pk_clean)
-            .context("Invalid Polygon private key hex")?
-            .with_chain_id(Some(POLYGON));
+        let parsed = parse_key_or_mnemonic(&private_key_or_phrase);
+        private_key_or_phrase.zeroize();
+        let (mut pk_clean, mnemonic_opt) = parsed?;
+        let signer_res = PrivateKeySigner::from_str(&pk_clean)
+            .context("Invalid Polygon private key hex");
+        let signer = match signer_res {
+            Ok(s) => s.with_chain_id(Some(POLYGON)),
+            Err(e) => {
+                pk_clean.zeroize();
+                password.zeroize();
+                return Err(e);
+            }
+        };
         let wallet_addr = format!("{:#x}", signer.address());
 
         let funder_clean = funder
@@ -472,7 +487,13 @@ impl ExecutionEngine {
                 signature_type,
                 label: Some("Primary".into()),
             };
-            save_encrypted_vault(&self.vault_path, &password, &secret, &hint)?;
+            let save_res = save_encrypted_vault(&self.vault_path, &password, &secret, &hint);
+            pk_clean.zeroize();
+            password.zeroize();
+            save_res?;
+        } else {
+            pk_clean.zeroize();
+            password.zeroize();
         }
 
         self.authenticate_live(signer, funder_clean, signature_type)
@@ -948,6 +969,12 @@ impl ExecutionEngine {
             _ => OrderType::GTC,
         };
 
+        if !req.price.is_finite() || !(0.001..=0.999).contains(&req.price) {
+            return Err(anyhow!("Order price out of valid range (0.1¢–99.9¢)"));
+        }
+        if !req.size.is_finite() || req.size <= 0.0 {
+            return Err(anyhow!("Order size must be greater than zero"));
+        }
         let price_dec = Decimal::from_f64(req.price)
             .ok_or_else(|| anyhow!("Invalid price"))?
             .round_dp(4)

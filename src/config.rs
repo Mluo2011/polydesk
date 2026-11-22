@@ -222,8 +222,24 @@ impl AppConfig {
         self.builder_label = HARDCODED_BUILDER_LABEL.to_string();
         self.builder_taker_bps = self.builder_taker_bps.min(100);
         self.builder_maker_bps = self.builder_maker_bps.min(50);
+        // Enforce encrypted TLS/WSS endpoints (prevent accidental downgrade to plaintext HTTP/WS)
+        if !self.clob_host.starts_with("https://") {
+            self.clob_host = default_clob_host();
+        }
+        if !self.gamma_host.starts_with("https://") {
+            self.gamma_host = default_gamma_host();
+        }
+        if !self.data_host.starts_with("https://") {
+            self.data_host = default_data_host();
+        }
+        if !self.ws_market_url.starts_with("wss://") {
+            self.ws_market_url = default_ws_market_url();
+        }
         if self.language != "zh" {
             self.language = "en".to_string();
+        }
+        if self.theme != "light" {
+            self.theme = "dark".to_string();
         }
         if self.github_repo.is_empty() && !DEFAULT_GITHUB_REPO.is_empty() {
             self.github_repo = DEFAULT_GITHUB_REPO.to_string();

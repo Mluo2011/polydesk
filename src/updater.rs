@@ -64,6 +64,27 @@ pub fn cleanup_previous_update() {
     }
 }
 
+fn is_valid_github_repo(repo: &str) -> bool {
+    let mut parts = repo.split('/');
+    let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let valid_seg = |s: &str| {
+        !s.is_empty()
+            && s != "."
+            && s != ".."
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    };
+    valid_seg(owner) && valid_seg(name)
+}
+
+fn is_trusted_github_asset_url(url: &str) -> bool {
+    url.starts_with("https://github.com/")
+        || url.starts_with("https://objects.githubusercontent.com/")
+        || url.starts_with("https://release-assets.githubusercontent.com/")
+}
+
 pub async fn check_github_release(http: &Client, repo: &str) -> UpdateStatus {
     let repo_clean = repo.trim().trim_matches('/');
     let base = UpdateStatus {
@@ -80,9 +101,9 @@ pub async fn check_github_release(http: &Client, repo: &str) -> UpdateStatus {
         error: None,
     };
 
-    if repo_clean.is_empty() || !repo_clean.contains('/') {
+    if !is_valid_github_repo(repo_clean) {
         return UpdateStatus {
-            error: Some("GitHub repo not configured (set owner/repo in Settings)".into()),
+            error: Some("GitHub repo invalid or not configured (expected owner/repo)".into()),
             ..base
         };
     }
@@ -193,6 +214,10 @@ pub async fn download_and_apply_update(http: &Client, repo: &str) -> Result<Stri
         .checksum_url
         .ok_or_else(|| anyhow!("Release is missing SHA256SUMS.txt (refusing unverified binary)"))?;
 
+    if !is_trusted_github_asset_url(&asset_url) || !is_trusted_github_asset_url(&checksum_url) {
+        return Err(anyhow!("Refusing untrusted non-GitHub release asset URL"));
+    }
+
     let checksum_text = http
         .get(&checksum_url)
         .send()
@@ -258,5 +283,11 @@ mod tests {
         assert!(verify_sha256_manifest(&manifest, "polydesk-linux-x86_64", data).is_ok());
         assert!(verify_sha256_manifest(&manifest, "polydesk-linux-x86_64", b"tampered").is_err());
         assert!(verify_sha256_manifest(&manifest, "missing-bin", data).is_err());
+        assert!(is_valid_github_repo("Mluo2011/polydesk"));
+        assert!(!is_valid_github_repo("../evil/repo"));
+        assert!(!is_valid_github_repo("owner/repo?foo=bar"));
+        assert!(is_trusted_github_asset_url("https://github.com/Mluo2011/polydesk/releases/download/v0.2.5/polydesk-linux-x86_64"));
+        assert!(!is_trusted_github_asset_url("http://github.com/Mluo2011/polydesk/releases/download/v0.2.5/bin"));
+        assert!(!is_trusted_github_asset_url("https://evil.example/bin"));
     }
 }

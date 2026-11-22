@@ -593,10 +593,10 @@ impl PolyDeskDesktop {
         });
     }
 
-    pub(crate) fn trigger_create_new_wallet(&self) {
+    pub(crate) fn trigger_create_new_wallet(&mut self) {
         let core = self.core.clone();
         let tx = self.tx.clone();
-        let pass = self.vault_pass_input.clone();
+        let pass = std::mem::take(&mut self.vault_pass_input);
         let persist = self.wallet_persist_vault;
         self.rt.spawn(async move {
             match core.execution.create_and_unlock_new_wallet(pass, persist).await {
@@ -614,12 +614,14 @@ impl PolyDeskDesktop {
         });
     }
 
-    pub(crate) fn trigger_reveal_backup(&self) {
+    pub(crate) fn trigger_reveal_backup(&mut self) {
         let core = self.core.clone();
         let tx = self.tx.clone();
-        let pass = self.reveal_pass_input.clone();
+        let mut pass = std::mem::take(&mut self.reveal_pass_input);
         self.rt.spawn(async move {
-            match core.execution.reveal_vault_backup(&pass) {
+            let res = core.execution.reveal_vault_backup(&pass);
+            zeroize::Zeroize::zeroize(&mut pass);
+            match res {
                 Ok(w) => {
                     let _ = tx.send(UiMsg::WalletRevealed(w));
                 }
@@ -630,13 +632,13 @@ impl PolyDeskDesktop {
         });
     }
 
-    pub(crate) fn trigger_connect_wallet(&self) {
+    pub(crate) fn trigger_connect_wallet(&mut self) {
         let core = self.core.clone();
         let tx = self.tx.clone();
-        let pk = self.wallet_pk_input.clone();
+        let pk = std::mem::take(&mut self.wallet_pk_input);
         let funder = (!self.wallet_funder_input.trim().is_empty()).then(|| self.wallet_funder_input.clone());
         let st = self.wallet_sig_type;
-        let pass = self.vault_pass_input.clone();
+        let pass = std::mem::take(&mut self.vault_pass_input);
         let persist = self.wallet_persist_vault;
         self.rt.spawn(async move {
             match core.execution.save_and_unlock_wallet(pk, funder, st, pass, persist).await {
@@ -649,12 +651,14 @@ impl PolyDeskDesktop {
         });
     }
 
-    pub(crate) fn trigger_unlock_vault(&self) {
+    pub(crate) fn trigger_unlock_vault(&mut self) {
         let core = self.core.clone();
         let tx = self.tx.clone();
-        let pass = self.vault_pass_input.clone();
+        let mut pass = std::mem::take(&mut self.vault_pass_input);
         self.rt.spawn(async move {
-            match core.execution.unlock_existing_vault(&pass).await {
+            let res = core.execution.unlock_existing_vault(&pass).await;
+            zeroize::Zeroize::zeroize(&mut pass);
+            match res {
                 Ok(acc) => {
                     let _ = tx.send(UiMsg::AccountUpdated(acc));
                     let _ = tx.send(UiMsg::Toast { text: "Vault unlocked — LIVE active".into(), is_err: false });
@@ -1103,44 +1107,73 @@ impl eframe::App for PolyDeskDesktop {
                         };
                         let stroke = if sel { pal.blue } else { pal.border };
 
-                        Frame::NONE
+                        let mut star_clicked = false;
+                        let mut star_hovered = false;
+                        let display_q = self.display_text(&m.question);
+
+                        let mut card = Frame::NONE
                             .fill(fill)
                             .stroke(Stroke::new(1.0, stroke))
                             .corner_radius(CornerRadius::same(10))
                             .inner_margin(Margin::same(10))
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    let starred = wl.contains(&m.condition_id);
-                                    if ui.add(egui::Button::new(RichText::new("★").color(if starred { pal.amber } else { pal.text_muted })).frame(false)).clicked() {
-                                        toggle_star = Some(m.condition_id.clone());
-                                    }
-                                    let display_q = self.display_text(&m.question);
-                                    let q_resp = ui.add(
-                                        egui::Label::new(RichText::new(&display_q).size(12.5).color(pal.text_primary))
-                                            .wrap()
-                                            .sense(egui::Sense::click()),
-                                    );
-                                    let q_resp = if self.lang == Lang::Zh && display_q != m.question {
-                                        q_resp.on_hover_text(format!("{display_q}\n{}", m.question))
-                                    } else {
-                                        q_resp
-                                    };
-                                    if q_resp.clicked() {
-                                        clicked_market = Some(m.clone());
-                                    }
-                                });
-                                ui.add_space(6.0);
-                                ui.horizontal(|ui| {
-                                    let yp = m.outcome_prices.first().copied().or(m.last_trade_price);
-                                    let np = m.outcome_prices.get(1).copied().or_else(|| yp.map(|y| 1.0 - y));
-                                    ui.label(RichText::new(format_odds(yp, self.odds_fmt, m.tick_size)).monospace().strong().size(12.0).color(pal.green));
-                                    ui.label(RichText::new("/").color(pal.text_muted));
-                                    ui.label(RichText::new(format_odds(np, self.odds_fmt, m.tick_size)).monospace().strong().size(12.0).color(pal.red));
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        ui.label(RichText::new(format!("{} Vol", format_usd(m.volume_24hr, false))).monospace().small().color(pal.text_muted));
-                                    });
+                            .begin(ui);
+                        {
+                            let ui = &mut card.content_ui;
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                let starred = wl.contains(&m.condition_id);
+                                let star_resp = ui.add(
+                                    egui::Button::new(RichText::new("★").color(if starred { pal.amber } else { pal.text_muted }))
+                                        .frame(false),
+                                );
+                                star_hovered = star_resp.hovered();
+                                if star_resp.clicked() {
+                                    toggle_star = Some(m.condition_id.clone());
+                                    star_clicked = true;
+                                }
+                                ui.add(
+                                    egui::Label::new(RichText::new(&display_q).size(12.5).color(pal.text_primary))
+                                        .wrap()
+                                        .selectable(false),
+                                );
+                            });
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                let yp = m.outcome_prices.first().copied().or(m.last_trade_price);
+                                let np = m.outcome_prices.get(1).copied().or_else(|| yp.map(|y| 1.0 - y));
+                                ui.add(egui::Label::new(RichText::new(format_odds(yp, self.odds_fmt, m.tick_size)).monospace().strong().size(12.0).color(pal.green)).selectable(false));
+                                ui.add(egui::Label::new(RichText::new("/").color(pal.text_muted)).selectable(false));
+                                ui.add(egui::Label::new(RichText::new(format_odds(np, self.odds_fmt, m.tick_size)).monospace().strong().size(12.0).color(pal.red)).selectable(false));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.add(egui::Label::new(RichText::new(format!("{} Vol", format_usd(m.volume_24hr, false))).monospace().small().color(pal.text_muted)).selectable(false));
                                 });
                             });
+                        }
+
+                        // Make the ENTIRE market card clickable (title, blank area, prices, volume)
+                        // while preserving the ★ button and blocking clicks when a modal is above!
+                        let card_rect = card.allocate_space(ui).rect;
+                        let card_id = ui.make_persistent_id(("mkt_card", &m.condition_id));
+                        let hover_resp = ui.interact(card_rect, card_id, egui::Sense::hover());
+                        let card_hovered = hover_resp.hovered() && !star_hovered;
+                        if card_hovered && !sel {
+                            card.frame.fill = if pal.light {
+                                Color32::from_rgb(235, 241, 249)
+                            } else {
+                                Color32::from_rgb(22, 30, 47)
+                            };
+                            card.frame.stroke = Stroke::new(1.0, pal.border_strong);
+                        }
+                        card.paint(ui);
+                        if self.lang == Lang::Zh && display_q != m.question {
+                            hover_resp.on_hover_text(format!("{display_q}\n{}", m.question));
+                        }
+                        if card_hovered {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            if ui.input(|i| i.pointer.primary_clicked()) && !star_clicked {
+                                clicked_market = Some(m.clone());
+                            }
+                        }
                     }
 
                     // Paginated Load More across ALL active Polymarket markets

@@ -97,7 +97,11 @@ struct WalletDepositSheet: View {
                         }
                     } else if engine.account?.vault.exists == true {
                         SecureField(engine.t("Vault passphrase", "本地加密库密码"), text: $vaultPass)
-                        Button(engine.t("Unlock Live Wallet", "解锁实盘钱包")) { engine.unlockVault(password: vaultPass) }
+                        Button(engine.t("Unlock Live Wallet", "解锁实盘钱包")) {
+                            let p = vaultPass
+                            vaultPass = ""
+                            engine.unlockVault(password: p)
+                        }
                     } else {
                         Picker("", selection: $setupMode) {
                             Text(engine.t("Create New Wallet", "生成随机新钱包")).tag(0)
@@ -128,7 +132,11 @@ struct WalletDepositSheet: View {
                             TextField("Funder / Proxy (optional)", text: $funder)
                             SecureField(engine.t("Vault Password (min 6 chars)", "加密库密码 (≥6位)"), text: $vaultPass)
                             Button(engine.t("Authenticate & Unlock LIVE", "认证并解锁实盘")) {
-                                engine.connectWallet(pk: pk, funder: funder, sigType: sigType, password: vaultPass)
+                                let k = pk
+                                let p = vaultPass
+                                pk = ""
+                                vaultPass = ""
+                                engine.connectWallet(pk: k, funder: funder, sigType: sigType, password: p)
                             }
                         }
                     }
@@ -166,6 +174,8 @@ struct WalletDepositSheet: View {
             .onDisappear {
                 engine.revealedWallet = nil
                 revealPass = ""
+                pk = ""
+                vaultPass = ""
             }
         }
     }

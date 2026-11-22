@@ -33,11 +33,30 @@ impl Default for WalletSignatureType {
 
 /// Newly generated (or user-revealed) local BIP-39 wallet details.
 /// Generated 100% locally via OS CSPRNG; never transmitted to any server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GeneratedWallet {
     pub address: String,
     pub private_key: String,
     pub mnemonic: Option<String>,
+}
+
+impl std::fmt::Debug for GeneratedWallet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeneratedWallet")
+            .field("address", &self.address)
+            .field("private_key", &"[REDACTED]")
+            .field("mnemonic", &self.mnemonic.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
+impl Drop for GeneratedWallet {
+    fn drop(&mut self) {
+        self.private_key.zeroize();
+        if let Some(ref mut m) = self.mnemonic {
+            m.zeroize();
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -203,13 +222,25 @@ pub fn save_encrypted_vault(
     };
 
     let serialized = serde_json::to_string_pretty(&payload)?;
-    fs::write(path, serialized)
-        .with_context(|| format!("failed writing vault at {}", path.display()))?;
-
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("failed opening vault at {}", path.display()))?;
+        f.write_all(serialized.as_bytes())
+            .with_context(|| format!("failed writing vault at {}", path.display()))?;
         let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, serialized)
+            .with_context(|| format!("failed writing vault at {}", path.display()))?;
     }
 
     Ok(())
@@ -223,6 +254,13 @@ pub fn load_encrypted_vault(path: &Path, password: &str) -> Result<VaultSecret> 
     let salt = B64.decode(&file.salt_b64)?;
     let nonce_bytes = B64.decode(&file.nonce_b64)?;
     let ciphertext = B64.decode(&file.ciphertext_b64)?;
+
+    if salt.len() < 8 {
+        return Err(anyhow!("Corrupted vault file (invalid salt length)"));
+    }
+    if nonce_bytes.len() != 12 {
+        return Err(anyhow!("Corrupted vault file (invalid AES-GCM nonce length)"));
+    }
 
     let mut key = derive_key(password, &salt)?;
     let cipher = Aes256Gcm::new_from_slice(&key)
@@ -294,15 +332,35 @@ mod tests {
         assert_eq!(pk_direct, w.private_key);
         assert!(m2.is_none());
 
+        // Verify Debug formatting NEVER leaks private key or mnemonic
+        let dbg = format!("{w:?}");
+        assert!(!dbg.contains(&w.private_key));
+        assert!(!dbg.contains(phrase));
+        assert!(dbg.contains("[REDACTED]"));
+
         // Verify true CSPRNG uniqueness across multiple generated wallets
         let mut addrs = std::collections::HashSet::new();
         let mut phrases = std::collections::HashSet::new();
         for _ in 0..5 {
             let g = generate_local_wallet().unwrap();
-            addrs.insert(g.address);
-            phrases.insert(g.mnemonic.unwrap());
+            addrs.insert(g.address.clone());
+            phrases.insert(g.mnemonic.clone().unwrap());
         }
         assert_eq!(addrs.len(), 5);
         assert_eq!(phrases.len(), 5);
+    }
+
+    #[test]
+    fn corrupted_nonce_returns_error_not_panic() {
+        let dir = std::env::temp_dir().join(format!("polydesk-vault-bad-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("vault.json");
+        fs::write(
+            &path,
+            r#"{"version":1,"salt_b64":"AAAAAAAAAAAAAAAAAAAAAA==","nonce_b64":"AAAA","ciphertext_b64":"AAAA","address_hint":"0x1","signature_type":"eoa","funder":null}"#,
+        )
+        .unwrap();
+        assert!(load_encrypted_vault(&path, "password123").is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

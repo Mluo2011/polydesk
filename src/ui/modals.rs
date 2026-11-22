@@ -57,9 +57,11 @@ impl PolyDeskDesktop {
 
         if !open {
             self.modal = None;
-            // Clear sensitive in-memory UI display when closing the wallet window
+            // Clear & zeroize sensitive in-memory UI fields when closing the wallet window
             self.revealed_wallet = None;
-            self.reveal_pass_input.clear();
+            zeroize::Zeroize::zeroize(&mut self.reveal_pass_input);
+            zeroize::Zeroize::zeroize(&mut self.wallet_pk_input);
+            zeroize::Zeroize::zeroize(&mut self.vault_pass_input);
         }
     }
 
@@ -156,7 +158,7 @@ impl PolyDeskDesktop {
                             w.private_key.clone()
                         };
                         ui.label(RichText::new(pk_short).monospace().small().color(pal.red_text))
-                            .on_hover_text(&w.private_key);
+                            .on_hover_text(tr(l, "Click Copy to copy your full private key", "点击右侧「复制」获取完整私钥"));
                         if ui.small_button(tr(l, "Copy", "复制")).clicked() {
                             ui.ctx().copy_text(w.private_key.clone());
                             self.push_toast(tr(l, "Copied private key", "已复制私钥").into(), false);
