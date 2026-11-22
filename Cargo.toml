@@ -1,0 +1,76 @@
+[workspace]
+members = [".", "crates/polydesk-ffi"]
+resolver = "2"
+
+[package]
+name = "polydesk"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.95.0"
+description = "Native GPU ultra-low-latency Polymarket CLOB V2 trading terminal (Linux, Windows 10/11, macOS, and iOS/iPadOS via Rust FFI)"
+license = "MIT"
+
+[lib]
+name = "polydesk"
+path = "src/lib.rs"
+
+[[bin]]
+name = "polydesk"
+path = "src/main.rs"
+
+[features]
+default = ["desktop"]
+desktop = ["dep:eframe", "dep:egui"]
+
+[dependencies]
+# Official Polymarket CLOB V2 Rust SDK (Polymarket/rs-clob-client-v2)
+polymarket_client_sdk_v2 = { version = "0.9.1", features = ["clob", "ws", "heartbeats", "bridge"] }
+alloy = { version = "1.6", default-features = false, features = ["signer-local", "signers"] }
+
+# Native GPU desktop GUI (Linux X11/Wayland, Windows 10/11 OpenGL, macOS) — ZERO browser / ZERO WebView!
+eframe = { version = "0.37.0", optional = true, default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "clipboard"] }
+egui = { version = "0.37.0", optional = true }
+
+# Async runtime & networking
+tokio = { version = "1.44", features = ["full"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
+futures = "0.3"
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls", "http2", "gzip"] }
+
+# Serialization & config
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Financial math & identifiers
+rust_decimal = { version = "1.40", features = ["serde", "serde-float"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.16", features = ["v4", "serde"] }
+
+# Local encrypted wallet vault & SHA-256 update verification
+aes-gcm = "0.10"
+argon2 = "0.5"
+rand = "0.8"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+zeroize = "1.8"
+
+# GitHub Releases auto-updater
+semver = "1.0"
+
+# Concurrency, logging, errors, paths
+dashmap = "6.1"
+parking_lot = "0.12"
+dirs = "6.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+thiserror = "2.0"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

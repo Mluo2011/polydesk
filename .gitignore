@@ -1,0 +1,14 @@
+/target/
+/dist/
+/ios/build/
+/ios/PolyDesk.xcodeproj/
+/ios/Payload/
+/ios/*.ipa
+*.ipa
+*.old
+*.staged
+vault.json
+config.toml
+paper_state.json
+.env
+.DS_Store

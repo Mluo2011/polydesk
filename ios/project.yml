@@ -1,0 +1,34 @@
+name: PolyDesk
+options:
+  bundleIdPrefix: com.polydesk
+  deploymentTarget:
+    iOS: "16.0"
+
+targets:
+  PolyDesk:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: PolyDesk
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.polydesk.terminal
+        PRODUCT_NAME: PolyDesk
+        INFOPLIST_FILE: PolyDesk/Info.plist
+        SWIFT_VERSION: "5.9"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: "NO"
+        SWIFT_OBJC_BRIDGING_HEADER: PolyDesk/PolyDesk-Bridging-Header.h
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/../crates/polydesk-ffi/include"
+        LIBRARY_SEARCH_PATHS:
+          - "$(SRCROOT)/../target/aarch64-apple-ios/release"
+        OTHER_LDFLAGS:
+          - "-lpolydesk_ffi"
+          - "-framework"
+          - "Security"
+          - "-framework"
+          - "SystemConfiguration"
+          - "-lresolv"
+        ENABLE_BITCODE: "NO"
