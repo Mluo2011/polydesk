@@ -65,8 +65,15 @@ struct ChartView: View {
                 maxP = min(0.999, maxP + span)
                 let rng = max(0.005, maxP - minP)
 
-                func yOf(_ p: Double) -> CGFloat { 8 + CGFloat((maxP - p) / rng) * plotH }
-                func xOf(_ i: Int) -> CGFloat { 6 + CGFloat(i) / CGFloat(prices.count - 1) * plotW }
+                let minT = pts.map(\.t).min() ?? 0
+                let maxT = max(minT + 1, pts.map(\.t).max() ?? (minT + 1))
+                let spanT = Double(maxT - minT)
+
+                func yOf(_ p: Double) -> CGFloat { 10 + CGFloat((maxP - p) / rng) * plotH }
+                func xOf(_ i: Int) -> CGFloat {
+                    let frac = Double(pts[i].t - minT) / spanT
+                    return 8 + CGFloat(min(1.0, max(0.0, frac))) * plotW
+                }
 
                 // Bollinger Bands (20, 2σ)
                 if showBB && prices.count >= 20 {
@@ -119,11 +126,35 @@ struct ChartView: View {
                     }
                 } else {
                     var path = Path()
+                    var area = Path()
                     for (i, p) in prices.enumerated() {
                         let pt = CGPoint(x: xOf(i), y: yOf(p))
-                        if i == 0 { path.move(to: pt) } else { path.addLine(to: pt) }
+                        if i == 0 {
+                            path.move(to: pt)
+                            area.move(to: CGPoint(x: pt.x, y: 10 + plotH))
+                            area.addLine(to: pt)
+                        } else {
+                            path.addLine(to: pt)
+                            area.addLine(to: pt)
+                        }
                     }
-                    ctx.stroke(path, with: .color(lineCol), lineWidth: 2)
+                    if let lastIdx = prices.indices.last {
+                        let lastPt = CGPoint(x: xOf(lastIdx), y: yOf(prices[lastIdx]))
+                        area.addLine(to: CGPoint(x: lastPt.x, y: 10 + plotH))
+                        area.closeSubpath()
+                        ctx.fill(
+                            area,
+                            with: .linearGradient(
+                                Gradient(colors: [lineCol.opacity(0.24), lineCol.opacity(0.0)]),
+                                startPoint: CGPoint(x: 0, y: 10),
+                                endPoint: CGPoint(x: 0, y: 10 + plotH)
+                            )
+                        )
+                        ctx.stroke(path, with: .color(lineCol), lineWidth: 2.2)
+                        let dot = CGRect(x: lastPt.x - 4, y: lastPt.y - 4, width: 8, height: 8)
+                        ctx.fill(Path(ellipseIn: dot), with: .color(lineCol))
+                        ctx.stroke(Path(ellipseIn: dot), with: .color(.white), lineWidth: 1.2)
+                    }
                 }
 
                 // EMA 9

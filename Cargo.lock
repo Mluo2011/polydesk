@@ -4522,7 +4522,7 @@ dependencies = [
 
 [[package]]
 name = "polydesk"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "aes-gcm",
  "alloy",
@@ -4557,7 +4557,7 @@ dependencies = [
 
 [[package]]
 name = "polydesk-ffi"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "polydesk",
  "serde",

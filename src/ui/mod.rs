@@ -55,6 +55,7 @@ enum OrderChoice {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RightTab {
+    QuickTrade,
     Ladder,
     ProOrders,
 }
@@ -70,7 +71,7 @@ enum DeckTab {
 }
 
 pub enum UiMsg {
-    MarketsLoaded(Vec<MarketSummary>),
+    MarketsLoaded { markets: Vec<MarketSummary>, append: bool },
     HistoryLoaded(String, Vec<PricePoint>),
     WhalesLoaded(String, WhaleFlowSummary),
     SiblingsLoaded(String, EventSiblings),
@@ -102,6 +103,8 @@ pub struct PolyDeskDesktop {
 
     show_markets_rail: bool,
     markets: Vec<MarketSummary>,
+    markets_offset: usize,
+    loading_more_markets: bool,
     search_query: String,
     category: String,
     active_market: Option<MarketSummary>,
@@ -113,6 +116,12 @@ pub struct PolyDeskDesktop {
     indicators: IndicatorConfig,
     whale_flow: Option<WhaleFlowSummary>,
     ladder_state: LadderState,
+
+    // Polymarket-style 1-click Quick Trade state
+    quick_buy: bool,
+    quick_limit_mode: bool,
+    quick_amount_input: String,
+    quick_limit_cents: f64,
 
     order_choice: OrderChoice,
     stake_value: f64,
@@ -180,6 +189,8 @@ impl PolyDeskDesktop {
             deposit_info: None,
             show_markets_rail: true,
             markets: Vec::new(),
+            markets_offset: 0,
+            loading_more_markets: false,
             search_query: String::new(),
             category: "all".into(),
             active_market: None,
@@ -191,11 +202,15 @@ impl PolyDeskDesktop {
             indicators: IndicatorConfig::default(),
             whale_flow: None,
             ladder_state: LadderState::default(),
+            quick_buy: true,
+            quick_limit_mode: false,
+            quick_amount_input: "25".into(),
+            quick_limit_cents: 50.0,
             order_choice: OrderChoice::Gtc,
             stake_value: 25.0,
             stake_in_usd: true,
             timed_fok_ms: 1500,
-            right_tab: RightTab::Ladder,
+            right_tab: RightTab::QuickTrade,
             deck_tab: DeckTab::Positions,
             rule_kind: RuleKind::StopLoss,
             rule_side_sell: true,
@@ -387,6 +402,10 @@ impl PolyDeskDesktop {
     }
 
     fn trigger_load_markets(&self) {
+        self.trigger_load_markets_page(0, false);
+    }
+
+    fn trigger_load_markets_page(&self, offset: usize, append: bool) {
         let core = self.core.clone();
         let tx = self.tx.clone();
         let q = self.search_query.clone();
@@ -394,16 +413,17 @@ impl PolyDeskDesktop {
         self.rt.spawn(async move {
             match core
                 .market_client
-                .fetch_markets_bilingual(
+                .fetch_markets_page(
                     (!q.trim().is_empty()).then_some(q.as_str()),
                     Some(cat.as_str()),
-                    50,
+                    100,
+                    offset,
                     &core.translator,
                     false,
                 )
                 .await
             {
-                Ok(ms) => { let _ = tx.send(UiMsg::MarketsLoaded(ms)); }
+                Ok(ms) => { let _ = tx.send(UiMsg::MarketsLoaded { markets: ms, append }); }
                 Err(e) => { let _ = tx.send(UiMsg::Toast { text: format!("Markets error: {e}"), is_err: true }); }
             }
         });
@@ -416,6 +436,7 @@ impl PolyDeskDesktop {
         self.rule_trigger_cents = (init_cents - 5.0).max(1.0);
         self.scale_start_cents = (init_cents - 1.0).max(1.0);
         self.scale_end_cents = (init_cents - 6.0).max(0.5);
+        self.quick_limit_cents = init_cents.round().clamp(1.0, 99.0);
         self.ladder_state.reset_for_market(tick);
         self.active_outcome_idx = outcome_idx;
         self.active_market = Some(market.clone());
@@ -477,10 +498,19 @@ impl PolyDeskDesktop {
 
     fn place_order(&self, side: &str, raw_price: f64, choice: OrderChoice) {
         let Some(m) = self.active_market.as_ref() else { return; };
-        let Some(aid) = self.active_asset_id() else { return; };
         let tick_ticks = ((m.tick_size * 10_000.0).round() as usize).max(1);
         let price = align_to_tick(raw_price, tick_ticks);
         let size = self.compute_shares(price);
+        self.place_order_exact(side, price, size, choice);
+    }
+
+    fn place_order_exact(&self, side: &str, raw_price: f64, shares: f64, choice: OrderChoice) {
+        let Some(m) = self.active_market.as_ref() else { return; };
+        let Some(aid) = self.active_asset_id() else { return; };
+        let tick_ticks = ((m.tick_size * 10_000.0).round() as usize).max(1);
+        let price = align_to_tick(raw_price, tick_ticks);
+        let size = (shares * 100.0).round() / 100.0;
+        if size < 0.01 { return; }
         let post_only = choice == OrderChoice::PostOnly;
         let order_type = match choice {
             OrderChoice::Gtc | OrderChoice::PostOnly => "GTC",
@@ -706,9 +736,19 @@ impl PolyDeskDesktop {
     fn drain_messages(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                UiMsg::MarketsLoaded(ms) => {
+                UiMsg::MarketsLoaded { markets: ms, append } => {
+                    self.loading_more_markets = false;
                     let need_select = self.active_market.is_none();
-                    self.markets = ms;
+                    if append {
+                        for m in ms {
+                            if !self.markets.iter().any(|x| x.condition_id == m.condition_id) {
+                                self.markets.push(m);
+                            }
+                        }
+                    } else {
+                        self.markets = ms;
+                        self.markets_offset = 0;
+                    }
                     if need_select && let Some(first) = self.markets.first().cloned() {
                         self.select_market(first, 0);
                     }
@@ -754,8 +794,12 @@ impl PolyDeskDesktop {
         {
             let now_sec = chrono::Utc::now().timestamp();
             if let Some(last) = self.history.last_mut() {
-                if now_sec - last.t < 2 { last.p = mid; }
-                else { self.history.push(PricePoint { t: now_sec, p: mid }); }
+                // Coalesce live ticks into 60s buckets so chart stays clean with true time spacing!
+                if now_sec - last.t < 60 {
+                    last.p = mid;
+                } else {
+                    self.history.push(PricePoint { t: now_sec, p: mid });
+                }
             }
         }
 
@@ -825,18 +869,18 @@ impl PolyDeskDesktop {
 
 fn surface_card() -> Frame {
     Frame::NONE
-        .fill(Color32::from_rgb(18, 24, 36))
-        .stroke(Stroke::new(1.0, Color32::from_rgb(31, 41, 55)))
-        .corner_radius(CornerRadius::same(10))
-        .inner_margin(Margin::same(12))
+        .fill(Color32::from_rgb(17, 22, 34))
+        .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(148, 163, 184, 24)))
+        .corner_radius(CornerRadius::same(12))
+        .inner_margin(Margin::same(14))
 }
 
 fn pill_frame(fill: Color32, stroke: Color32) -> Frame {
     Frame::NONE
         .fill(fill)
         .stroke(Stroke::new(1.0, stroke))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::symmetric(10, 5))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(Margin::symmetric(12, 6))
 }
 
 impl eframe::App for PolyDeskDesktop {
@@ -850,13 +894,13 @@ impl eframe::App for PolyDeskDesktop {
         let active_aid = self.active_asset_id().map(|s| s.to_string());
         let active_book = active_aid.as_deref().and_then(|a| self.core.feed.get_book_view(a, 60));
 
-        // 1. SLEEK, SPACIOUS TOP BAR (50px)
+        // 1. MODERN 58px TOP BAR WITH PROMINENT PORTFOLIO & CASH BALANCE
         let top_frame = Frame::NONE
-            .fill(Color32::from_rgb(13, 18, 28))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(27, 36, 50)))
-            .inner_margin(Margin::symmetric(14, 8));
+            .fill(Color32::from_rgb(13, 17, 27))
+            .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(148, 163, 184, 22)))
+            .inner_margin(Margin::symmetric(16, 8));
 
-        egui::Panel::top("top_bar").exact_size(50.0).frame(top_frame).show(ui, |ui| {
+        egui::Panel::top("top_bar").exact_size(58.0).frame(top_frame).show(ui, |ui| {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
 
@@ -864,65 +908,79 @@ impl eframe::App for PolyDeskDesktop {
                     self.show_markets_rail = !self.show_markets_rail;
                 }
 
-                let ws_col = if telem.ws_connected { Color32::from_rgb(16, 185, 129) } else { Color32::from_rgb(244, 63, 94) };
-                ui.label(RichText::new("●").color(ws_col).size(12.0));
-                ui.label(RichText::new("PolyDesk").strong().size(16.0).color(Color32::from_rgb(248, 250, 252)));
+                let ws_col = if telem.ws_connected { Color32::from_rgb(0, 211, 149) } else { Color32::from_rgb(255, 77, 106) };
+                ui.label(RichText::new("●").color(ws_col).size(11.0));
+                ui.label(RichText::new("PolyDesk").strong().size(17.5).color(Color32::from_rgb(248, 250, 252)));
 
                 // Mode badge (PAPER / LIVE)
                 let is_live = self.account.mode == TradingMode::Live;
-                let mode_col = if is_live { Color32::from_rgb(16, 185, 129) } else { Color32::from_rgb(251, 191, 36) };
-                let mode_bg = if is_live { Color32::from_rgba_unmultiplied(16, 185, 129, 24) } else { Color32::from_rgba_unmultiplied(245, 158, 11, 24) };
+                let mode_col = if is_live { Color32::from_rgb(0, 211, 149) } else { Color32::from_rgb(251, 191, 36) };
+                let mode_bg = if is_live { Color32::from_rgba_unmultiplied(0, 211, 149, 26) } else { Color32::from_rgba_unmultiplied(245, 158, 11, 24) };
                 if ui.add(
-                    egui::Button::new(RichText::new(if is_live { tr(l, "LIVE", "实盘") } else { tr(l, "PAPER", "模拟盘") }).strong().size(11.5).color(mode_col))
+                    egui::Button::new(RichText::new(if is_live { tr(l, "LIVE", "实盘") } else { tr(l, "PAPER", "模拟盘") }).strong().size(11.0).color(mode_col))
                         .fill(mode_bg)
                         .stroke(Stroke::new(1.0, mode_col))
-                        .corner_radius(CornerRadius::same(14)),
+                        .corner_radius(CornerRadius::same(16)),
                 ).clicked() {
                     self.modal = Some(ActiveModal::WalletAndDeposit);
                 }
 
-                // Balance & P&L pill (fixed width so live ticks NEVER shift topbar!)
+                // Prominent Polymarket-Style Top Balance Bar: Portfolio | Cash | P&L (locked widths -> zero jitter!)
                 let cash = if is_live { self.account.live_balance_usd.unwrap_or(0.0) } else { self.account.paper.cash_usd };
+                let mut pos_val = 0.0;
                 let mut upnl = 0.0;
                 for p in self.all_positions() {
                     let mk = self.core.feed.get_book_view(&p.asset_id, 1).and_then(|b| b.mid.or(b.best_bid)).unwrap_or(p.avg_entry);
+                    pos_val += p.shares * mk;
                     upnl += p.shares * (mk - p.avg_entry);
                 }
+                let portfolio = cash + pos_val;
                 let pnl = if is_live { upnl } else { self.account.paper.realized_pnl_usd + upnl };
-                let pnl_col = if pnl >= 0.0 { Color32::from_rgb(16, 185, 129) } else { Color32::from_rgb(244, 63, 94) };
-                pill_frame(Color32::from_rgb(18, 24, 36), Color32::from_rgb(31, 41, 55)).show(ui, |ui| {
-                    ui.set_width(172.0);
+                let pnl_col = if pnl >= 0.0 { Color32::from_rgb(0, 211, 149) } else { Color32::from_rgb(255, 77, 106) };
+
+                pill_frame(Color32::from_rgb(19, 25, 39), Color32::from_rgba_unmultiplied(148, 163, 184, 30)).show(ui, |ui| {
+                    ui.set_width(356.0);
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(format!("{:>9}", format_usd(cash, false))).monospace().strong().size(12.5));
-                        ui.label(RichText::new("·").color(Color32::from_rgb(71, 85, 105)));
+                        ui.spacing_mut().item_spacing.x = 14.0;
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 5.0;
+                            ui.label(RichText::new(tr(l, "Portfolio", "总资产")).small().color(Color32::from_rgb(138, 154, 178)));
+                            ui.label(RichText::new(format!("{:>9}", format_usd(portfolio, false))).monospace().strong().size(13.5).color(Color32::from_rgb(248, 250, 252)));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 5.0;
+                            ui.label(RichText::new(tr(l, "Cash", "余额")).small().color(Color32::from_rgb(138, 154, 178)));
+                            ui.label(RichText::new(format!("{:>9}", format_usd(cash, false))).monospace().strong().size(13.5).color(Color32::from_rgb(0, 211, 149)));
+                        });
                         ui.label(RichText::new(format!("{:>8}", format_usd(pnl, true))).monospace().strong().size(12.5).color(pnl_col));
                     });
                 });
 
-                // Compact latency pill (exact locked width so numbers NEVER shift siblings!)
+                // Subtle compact latency indicator
                 let clob_ms = if telem.warm_ping_ms.p50 > 0.0 { telem.warm_ping_ms.p50 } else { telem.order_rtt_ms.last };
-                let clob_col = if clob_ms <= 0.0 { Color32::GRAY } else if clob_ms < 40.0 { Color32::from_rgb(16, 185, 129) } else if clob_ms < 150.0 { Color32::from_rgb(251, 191, 36) } else { Color32::from_rgb(244, 63, 94) };
-                pill_frame(Color32::from_rgb(16, 22, 33), Color32::from_rgb(30, 41, 59)).show(ui, |ui| {
-                    ui.set_width(178.0);
+                let clob_col = if clob_ms <= 0.0 { Color32::GRAY } else if clob_ms < 60.0 { Color32::from_rgb(0, 211, 149) } else if clob_ms < 200.0 { Color32::from_rgb(251, 191, 36) } else { Color32::from_rgb(148, 163, 184) };
+                pill_frame(Color32::from_rgb(15, 20, 31), Color32::from_rgba_unmultiplied(148, 163, 184, 18)).show(ui, |ui| {
+                    ui.set_width(140.0);
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(format!("WS {:>3.0}ms", telem.ws_lag_ms.p50.min(999.0))).monospace().small().color(Color32::from_rgb(148, 163, 184)));
-                        ui.label(RichText::new("·").color(Color32::from_rgb(71, 85, 105)));
-                        ui.label(RichText::new(format!("CLOB {:>3.0}ms", clob_ms.min(999.0))).monospace().small().color(clob_col));
+                        ui.spacing_mut().item_spacing.x = 5.0;
+                        ui.label(RichText::new(format!("WS {:>3.0}ms", telem.ws_lag_ms.p50.min(999.0))).monospace().small().color(Color32::from_rgb(100, 116, 139)));
+                        ui.label(RichText::new("·").color(Color32::from_rgb(51, 65, 85)));
+                        ui.label(RichText::new(format!("{:>3.0}ms", clob_ms.min(999.0))).monospace().small().color(clob_col));
                     });
                 }).response.on_hover_text(format!(
-                    "Book apply: {:.0} µs | EIP-712 Sign: {:.0} µs | WS msgs: {}",
-                    telem.book_apply_us.p50, telem.sign_us.last, telem.ws_msgs_total
+                    "CLOB RTT: {:.0} ms | Book apply: {:.0} µs | EIP-712 Sign: {:.0} µs | WS msgs: {}",
+                    clob_ms, telem.book_apply_us.p50, telem.sign_us.last, telem.ws_msgs_total
                 ));
 
-                // Right actions — clean & minimal
+                // Right actions — sleek modern buttons
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
 
                     if ui.add(
-                        egui::Button::new(RichText::new(tr(l, "Cancel All", "全撤")).strong().color(Color32::from_rgb(254, 205, 211)))
-                            .fill(Color32::from_rgba_unmultiplied(244, 63, 94, 28))
-                            .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(244, 63, 94, 140)))
-                            .corner_radius(CornerRadius::same(7)),
+                        egui::Button::new(RichText::new(tr(l, "Cancel All", "全撤")).strong().size(12.0).color(Color32::from_rgb(254, 205, 211)))
+                            .fill(Color32::from_rgba_unmultiplied(255, 77, 106, 26))
+                            .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 77, 106, 110)))
+                            .corner_radius(CornerRadius::same(9)),
                     ).clicked() {
                         let core = self.core.clone();
                         self.rt.spawn(async move { let _ = core.execution.cancel_all().await; });
@@ -934,15 +992,16 @@ impl eframe::App for PolyDeskDesktop {
                     } else {
                         tr(l, "Settings", "设置")
                     };
-                    if ui.button(RichText::new(settings_lbl).color(if upd_dot { Color32::from_rgb(16, 185, 129) } else { Color32::from_rgb(203, 213, 225) })).on_hover_text(tr(l, "Updates & Keyboard Hotkeys", "自动更新与快捷键")).clicked() {
+                    if ui.button(RichText::new(settings_lbl).size(12.0).color(if upd_dot { Color32::from_rgb(0, 211, 149) } else { Color32::from_rgb(203, 213, 225) })).on_hover_text(tr(l, "Updates & Keyboard Hotkeys", "自动更新与快捷键")).clicked() {
                         self.modal = Some(ActiveModal::SettingsAndUpdates);
                     }
 
+                    // Primary vibrant Polymarket-blue Deposit / Wallet button
                     if ui.add(
-                        egui::Button::new(RichText::new(tr(l, "Wallet / Deposit", "钱包 / 充值")).strong().color(Color32::from_rgb(224, 242, 254)))
-                            .fill(Color32::from_rgba_unmultiplied(56, 189, 248, 34))
-                            .stroke(Stroke::new(1.0, Color32::from_rgb(56, 189, 248)))
-                            .corner_radius(CornerRadius::same(7)),
+                        egui::Button::new(RichText::new(tr(l, "+ Deposit / Wallet", "+ 充值 / 钱包")).strong().size(12.5).color(Color32::WHITE))
+                            .fill(Color32::from_rgb(46, 124, 246))
+                            .stroke(Stroke::NONE)
+                            .corner_radius(CornerRadius::same(9)),
                     ).clicked() {
                         self.modal = Some(ActiveModal::WalletAndDeposit);
                     }
@@ -963,21 +1022,21 @@ impl eframe::App for PolyDeskDesktop {
             });
         });
 
-        // 2. COLLAPSIBLE LEFT MARKET RAIL (Airy rounded cards)
+        // 2. COLLAPSIBLE LEFT MARKET RAIL (Modern rounded cards + ALL Polymarket pagination!)
         if self.show_markets_rail {
             let rail_frame = Frame::NONE
-                .fill(Color32::from_rgb(13, 18, 28))
-                .stroke(Stroke::new(1.0, Color32::from_rgb(27, 36, 50)))
+                .fill(Color32::from_rgb(13, 17, 27))
+                .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(148, 163, 184, 20)))
                 .inner_margin(Margin::same(12));
 
-            egui::Panel::left("markets_panel").exact_size(276.0).resizable(false).frame(rail_frame).show(ui, |ui| {
-                ui.set_max_width(252.0);
+            egui::Panel::left("markets_panel").exact_size(286.0).resizable(false).frame(rail_frame).show(ui, |ui| {
+                ui.set_max_width(262.0);
                 ui.horizontal(|ui| {
                     let has_q = !self.search_query.is_empty();
-                    let extra_w = if has_q { 76.0 } else { 52.0 };
+                    let extra_w = if has_q { 78.0 } else { 54.0 };
                     let resp = ui.add(
                         TextEdit::singleline(&mut self.search_query)
-                            .hint_text(tr(l, "Search EN / 中文...", "搜索市场 (支持中/英文)..."))
+                            .hint_text(tr(l, "Search all markets (EN / 中文)...", "搜索全站市场 (中/英文)..."))
                             .desired_width((ui.available_width() - extra_w).max(120.0)),
                     );
                     if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
@@ -992,17 +1051,19 @@ impl eframe::App for PolyDeskDesktop {
                     }
                 });
 
-                ui.add_space(6.0);
+                ui.add_space(7.0);
                 ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(5.0, 5.0);
+                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 5.0);
                     for (id, en, zh) in [
                         ("all", "All", "全部"),
                         ("sports", "Sports", "体育"),
                         ("crypto", "Crypto", "加密"),
                         ("politics", "Politics", "政治"),
+                        ("finance", "Finance", "金融"),
+                        ("tech", "Tech", "科技"),
                         ("watch", "★", "★"),
                     ] {
-                        if ui.selectable_label(self.category == id, tr(l, en, zh)).clicked() {
+                        if ui.selectable_label(self.category == id, RichText::new(tr(l, en, zh)).small()).clicked() {
                             self.category = id.into();
                             self.trigger_load_markets();
                         }
@@ -1014,20 +1075,21 @@ impl eframe::App for PolyDeskDesktop {
                 let wl: HashSet<String> = self.core.config.read().watchlist.iter().cloned().collect();
                 let mut clicked_market: Option<MarketSummary> = None;
                 let mut toggle_star: Option<String> = None;
+                let mut want_load_more = false;
 
                 ScrollArea::vertical().id_salt("mkt_scroll").max_height((ui.available_height() - sib_reserve).max(160.0)).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 7.0;
                     for m in &self.markets {
                         if self.category == "watch" && !wl.contains(&m.condition_id) { continue; }
                         let sel = self.active_market.as_ref().is_some_and(|a| a.condition_id == m.condition_id);
-                        let fill = if sel { Color32::from_rgba_unmultiplied(56, 189, 248, 22) } else { Color32::from_rgb(18, 24, 36) };
-                        let stroke = if sel { Color32::from_rgb(56, 189, 248) } else { Color32::from_rgb(29, 39, 54) };
+                        let fill = if sel { Color32::from_rgba_unmultiplied(46, 124, 246, 26) } else { Color32::from_rgb(19, 25, 38) };
+                        let stroke = if sel { Color32::from_rgb(46, 124, 246) } else { Color32::from_rgba_unmultiplied(148, 163, 184, 20) };
 
                         Frame::NONE
                             .fill(fill)
                             .stroke(Stroke::new(1.0, stroke))
-                            .corner_radius(CornerRadius::same(8))
-                            .inner_margin(Margin::same(9))
+                            .corner_radius(CornerRadius::same(10))
+                            .inner_margin(Margin::same(10))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     let starred = wl.contains(&m.condition_id);
@@ -1036,7 +1098,7 @@ impl eframe::App for PolyDeskDesktop {
                                     }
                                     let display_q = self.display_text(&m.question);
                                     let q_resp = ui.add(
-                                        egui::Label::new(RichText::new(&display_q).size(12.0).color(Color32::from_rgb(226, 232, 240)))
+                                        egui::Label::new(RichText::new(&display_q).size(12.5).color(Color32::from_rgb(235, 240, 248)))
                                             .wrap()
                                             .sense(egui::Sense::click()),
                                     );
@@ -1049,20 +1111,44 @@ impl eframe::App for PolyDeskDesktop {
                                         clicked_market = Some(m.clone());
                                     }
                                 });
-                                ui.add_space(5.0);
+                                ui.add_space(6.0);
                                 ui.horizontal(|ui| {
                                     let yp = m.outcome_prices.first().copied().or(m.last_trade_price);
                                     let np = m.outcome_prices.get(1).copied().or_else(|| yp.map(|y| 1.0 - y));
-                                    ui.label(RichText::new(format_odds(yp, self.odds_fmt, m.tick_size)).monospace().strong().size(11.5).color(Color32::from_rgb(16, 185, 129)));
+                                    ui.label(RichText::new(format_odds(yp, self.odds_fmt, m.tick_size)).monospace().strong().size(12.0).color(Color32::from_rgb(0, 211, 149)));
                                     ui.label(RichText::new("/").color(Color32::from_rgb(71, 85, 105)));
-                                    ui.label(RichText::new(format_odds(np, self.odds_fmt, m.tick_size)).monospace().strong().size(11.5).color(Color32::from_rgb(244, 63, 94)));
+                                    ui.label(RichText::new(format_odds(np, self.odds_fmt, m.tick_size)).monospace().strong().size(12.0).color(Color32::from_rgb(255, 77, 106)));
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        ui.label(RichText::new(format_usd(m.volume_24hr, false)).monospace().small().color(Color32::from_rgb(100, 116, 139)));
+                                        ui.label(RichText::new(format!("{} Vol", format_usd(m.volume_24hr, false))).monospace().small().color(Color32::from_rgb(100, 116, 139)));
                                     });
                                 });
                             });
                     }
+
+                    // Paginated Load More across ALL active Polymarket markets
+                    if self.category != "watch" && self.search_query.trim().is_empty() && !self.markets.is_empty() {
+                        ui.add_space(4.0);
+                        let lbl = if self.loading_more_markets {
+                            tr(l, "Loading more markets...", "正在加载更多市场...")
+                        } else {
+                            tr(l, "Load More Markets (+100)", "加载更多市场 (+100)")
+                        };
+                        if ui.add_sized(
+                            Vec2::new(ui.available_width(), 30.0),
+                            egui::Button::new(RichText::new(lbl).small().color(Color32::from_rgb(148, 163, 184)))
+                                .fill(Color32::from_rgb(19, 25, 38))
+                                .corner_radius(CornerRadius::same(8)),
+                        ).clicked() && !self.loading_more_markets {
+                            want_load_more = true;
+                        }
+                    }
                 });
+
+                if want_load_more {
+                    self.markets_offset += 100;
+                    self.loading_more_markets = true;
+                    self.trigger_load_markets_page(self.markets_offset, true);
+                }
 
                 if let Some(cid) = toggle_star {
                     let _ = self.core.execution.update_config_and_save(|c| {
@@ -1123,18 +1209,20 @@ impl eframe::App for PolyDeskDesktop {
             });
         }
 
-        // 3. SPACIOUS RIGHT EXECUTION COLUMN (420px — Clean Toggle: Ladder vs Pro Orders!)
+        // 3. SPACIOUS MODERN RIGHT EXECUTION COLUMN (426px — Quick Buy/Sell | Ladder | Pro Orders!)
         let right_frame = Frame::NONE
-            .fill(Color32::from_rgb(13, 18, 28))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(27, 36, 50)))
-            .inner_margin(Margin::same(12));
+            .fill(Color32::from_rgb(13, 17, 27))
+            .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(148, 163, 184, 20)))
+            .inner_margin(Margin::same(14));
 
         egui::Panel::right("exec_panel").exact_size(426.0).resizable(false).frame(right_frame).show(ui, |ui| {
-            ui.set_max_width(402.0);
-            // Segmented Switcher: Price Ladder | Pro Orders
+            ui.set_max_width(398.0);
+            // Clean 3-Way Segmented Switcher: Quick Trade | Price Ladder | Pro Orders
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.right_tab, RightTab::Ladder, RichText::new(tr(l, "Price Ladder", "一键盘口")).strong().size(12.5));
-                ui.selectable_value(&mut self.right_tab, RightTab::ProOrders, RichText::new(tr(l, "Pro Orders", "高级条件单")).strong().size(12.5));
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.selectable_value(&mut self.right_tab, RightTab::QuickTrade, RichText::new(tr(l, "Buy / Sell", "快捷买卖")).strong().size(12.5));
+                ui.selectable_value(&mut self.right_tab, RightTab::Ladder, RichText::new(tr(l, "Ladder", "盘口")).strong().size(12.5));
+                ui.selectable_value(&mut self.right_tab, RightTab::ProOrders, RichText::new(tr(l, "Pro", "条件单")).strong().size(12.5));
                 if self.right_tab == RightTab::Ladder {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.selectable_label(self.ladder_state.auto_center, tr(l, "Auto", "跟踪")).clicked() {
@@ -1144,7 +1232,7 @@ impl eframe::App for PolyDeskDesktop {
                             self.ladder_state.recenter(active_book.as_ref());
                         }
                         egui::ComboBox::from_id_salt("tick_step_cb")
-                            .width(54.0)
+                            .width(50.0)
                             .selected_text(format!("{}¢", self.ladder_state.step * 100.0))
                             .show_ui(ui, |ui| {
                                 for s in [0.001, 0.005, 0.01, 0.05] {
@@ -1157,9 +1245,14 @@ impl eframe::App for PolyDeskDesktop {
                 }
             });
 
-            ui.add_space(8.0);
+            ui.add_space(10.0);
 
             match self.right_tab {
+                RightTab::QuickTrade => {
+                    ScrollArea::vertical().id_salt("quick_trade_scroll").show(ui, |ui| {
+                        self.draw_quick_trade_panel(ui, active_book.as_ref());
+                    });
+                }
                 RightTab::Ladder => {
                     // Fixed-height Controls Card (ZERO reflow or height jitter on ticks!)
                     surface_card().show(ui, |ui| {
@@ -1313,13 +1406,13 @@ impl eframe::App for PolyDeskDesktop {
             }
         });
 
-        // 4. SPACIOUS CENTER STAGE (Header + Large Chart + Clean Bottom Tabs)
+        // 4. MODERN CENTER STAGE (Polymarket-style Hero Header + Gradient Chart + Clean Bottom Tabs)
         let center_frame = Frame::NONE
-            .fill(Color32::from_rgb(10, 13, 20))
-            .inner_margin(Margin::same(14));
+            .fill(Color32::from_rgb(9, 12, 18))
+            .inner_margin(Margin::same(16));
 
         egui::CentralPanel::default().frame(center_frame).show(ui, |ui| {
-            // Fixed-height single-line Market Title (auto-translated in 中文 mode; hover shows CN + EN!)
+            // Hero Market Title + Big Live Probability Readout (modern Polymarket feel!)
             if let Some(m) = self.active_market.clone() {
                 let title_disp = self.display_text(&m.question);
                 let title_tip = if self.lang == Lang::Zh && title_disp != m.question {
@@ -1328,32 +1421,63 @@ impl eframe::App for PolyDeskDesktop {
                     m.question.clone()
                 };
                 ui.add(
-                    egui::Label::new(RichText::new(&title_disp).strong().size(15.5).color(Color32::from_rgb(248, 250, 252)))
+                    egui::Label::new(RichText::new(&title_disp).strong().size(18.5).color(Color32::from_rgb(248, 250, 252)))
                         .truncate(),
                 )
                 .on_hover_text(title_tip);
 
                 ui.add_space(6.0);
 
-                // Fixed-width Outcome buttons on a single clean row (ZERO shifting when live odds update!)
+                // Polymarket-style Hero Live Odds + Delta + Outcome Pills
+                let live_px = active_book
+                    .as_ref()
+                    .and_then(|b| b.mid.or(b.best_ask).or(b.last_trade_price))
+                    .or_else(|| m.outcome_prices.get(self.active_outcome_idx).copied())
+                    .unwrap_or(0.5);
+                let first_hist = self.history.first().map(|p| p.p).unwrap_or(live_px);
+                let delta_pts = (live_px - first_hist) * 100.0;
+                let hero_col = if delta_pts >= 0.0 { Color32::from_rgb(0, 211, 149) } else { Color32::from_rgb(255, 77, 106) };
+
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    // Big clean probability readout (fixed width -> zero jitter)
+                    ui.add_sized(
+                        Vec2::new(98.0, 30.0),
+                        egui::Label::new(
+                            RichText::new(format_odds(Some(live_px), self.odds_fmt, m.tick_size))
+                                .monospace()
+                                .strong()
+                                .size(24.0)
+                                .color(hero_col),
+                        ),
+                    );
+                    ui.add_sized(
+                        Vec2::new(72.0, 22.0),
+                        egui::Label::new(
+                            RichText::new(format!("{}{:.1}%", if delta_pts >= 0.0 { "+" } else { "" }, delta_pts))
+                                .monospace()
+                                .strong()
+                                .size(12.5)
+                                .color(hero_col),
+                        ),
+                    );
+
                     for (idx, name) in m.outcomes.iter().enumerate() {
                         let tid = m.token_ids.get(idx).map(|s| s.as_str());
                         let px = tid
                             .and_then(|t| self.core.feed.get_book_view(t, 1))
                             .and_then(|b| b.mid.or(b.best_ask))
                             .or_else(|| m.outcome_prices.get(idx).copied());
-                        let col = if idx == 0 { Color32::from_rgb(16, 185, 129) } else { Color32::from_rgb(244, 63, 94) };
+                        let col = if idx == 0 { Color32::from_rgb(0, 211, 149) } else { Color32::from_rgb(255, 77, 106) };
                         let active = self.active_outcome_idx == idx;
                         let fill = if active {
-                            if idx == 0 { Color32::from_rgba_unmultiplied(16, 185, 129, 32) } else { Color32::from_rgba_unmultiplied(244, 63, 94, 32) }
+                            if idx == 0 { Color32::from_rgba_unmultiplied(0, 211, 149, 34) } else { Color32::from_rgba_unmultiplied(255, 77, 106, 34) }
                         } else {
-                            Color32::from_rgb(18, 24, 36)
+                            Color32::from_rgb(17, 22, 34)
                         };
-                        let stroke = if active { col } else { Color32::from_rgb(31, 41, 55) };
+                        let stroke = if active { col } else { Color32::from_rgba_unmultiplied(148, 163, 184, 24) };
                         let disp_name = self.display_text(name);
-                        let max_chars = if polydesk::translate::contains_cjk(&disp_name) { 7 } else { 11 };
+                        let max_chars = if polydesk::translate::contains_cjk(&disp_name) { 6 } else { 10 };
                         let short_name: String = if disp_name.chars().count() > max_chars {
                             format!("{}…", disp_name.chars().take(max_chars - 1).collect::<String>())
                         } else {
@@ -1366,15 +1490,18 @@ impl eframe::App for PolyDeskDesktop {
                             name.clone()
                         };
                         let resp = ui.add_sized(
-                            Vec2::new(142.0, 28.0),
+                            Vec2::new(134.0, 30.0),
                             egui::Button::new(RichText::new(lbl).monospace().strong().size(12.5).color(col))
                                 .fill(fill)
                                 .stroke(Stroke::new(1.0, stroke))
-                                .corner_radius(CornerRadius::same(7)),
+                                .corner_radius(CornerRadius::same(9)),
                         ).on_hover_text(tip);
                         if resp.clicked() && !active {
                             self.active_outcome_idx = idx;
                             self.ladder_state.reset_for_market(m.tick_size);
+                            if let Some(p) = px {
+                                self.quick_limit_cents = (p * 100.0).round().clamp(1.0, 99.0);
+                            }
                             if let Some(aid) = self.active_asset_id().map(|s| s.to_string()) {
                                 self.trigger_load_history(&aid);
                             }
@@ -1821,43 +1948,400 @@ impl PolyDeskDesktop {
             }
         }
     }
+
+    /// Polymarket-style 1-Click Quick Buy / Sell Card — enter amount, see instant payout & fees, click Buy/Sell!
+    fn draw_quick_trade_panel(&mut self, ui: &mut egui::Ui, active_book: Option<&polydesk::book::BookView>) {
+        let l = self.lang;
+        let Some(m) = self.active_market.clone() else {
+            ui.label(RichText::new(tr(l, "Select any market on the left to start trading.", "请在左侧选择任意市场开始交易。")).color(Color32::from_rgb(148, 163, 184)));
+            return;
+        };
+
+        let is_live = self.account.mode == TradingMode::Live;
+        let cash = if is_live { self.account.live_balance_usd.unwrap_or(0.0) } else { self.account.paper.cash_usd };
+        let active_pos = self.active_position().cloned();
+        let avail_shares = active_pos.as_ref().map(|p| p.shares).unwrap_or(0.0);
+
+        surface_card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+
+            // 1. Big Buy / Sell Segmented Switcher + Market / Limit Toggle
+            ui.horizontal(|ui| {
+                let half_w = ((ui.available_width() - 8.0) * 0.5).max(120.0);
+                let buy_fill = if self.quick_buy { Color32::from_rgba_unmultiplied(0, 211, 149, 36) } else { Color32::from_rgb(22, 29, 44) };
+                let buy_stroke = if self.quick_buy { Color32::from_rgb(0, 211, 149) } else { Color32::from_rgba_unmultiplied(148, 163, 184, 24) };
+                let buy_col = if self.quick_buy { Color32::from_rgb(0, 211, 149) } else { Color32::from_rgb(148, 163, 184) };
+                if ui.add_sized(
+                    Vec2::new(half_w, 34.0),
+                    egui::Button::new(RichText::new(tr(l, "Buy", "买入")).strong().size(14.0).color(buy_col))
+                        .fill(buy_fill)
+                        .stroke(Stroke::new(1.2, buy_stroke))
+                        .corner_radius(CornerRadius::same(9)),
+                ).clicked() {
+                    self.quick_buy = true;
+                }
+
+                let sell_fill = if !self.quick_buy { Color32::from_rgba_unmultiplied(255, 77, 106, 36) } else { Color32::from_rgb(22, 29, 44) };
+                let sell_stroke = if !self.quick_buy { Color32::from_rgb(255, 77, 106) } else { Color32::from_rgba_unmultiplied(148, 163, 184, 24) };
+                let sell_col = if !self.quick_buy { Color32::from_rgb(255, 77, 106) } else { Color32::from_rgb(148, 163, 184) };
+                if ui.add_sized(
+                    Vec2::new(half_w, 34.0),
+                    egui::Button::new(RichText::new(tr(l, "Sell", "卖出")).strong().size(14.0).color(sell_col))
+                        .fill(sell_fill)
+                        .stroke(Stroke::new(1.2, sell_stroke))
+                        .corner_radius(CornerRadius::same(9)),
+                ).clicked() {
+                    self.quick_buy = false;
+                }
+            });
+
+            ui.add_space(10.0);
+
+            // 2. Order Type Pill: Market vs Limit
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(tr(l, "Order Type", "订单类型")).small().color(Color32::from_rgb(138, 154, 178)));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.selectable_label(self.quick_limit_mode, RichText::new(tr(l, "Limit", "限价单")).small()).clicked() {
+                        self.quick_limit_mode = true;
+                        if let Some(px) = active_book.and_then(|b| b.mid.or(b.best_ask)) {
+                            self.quick_limit_cents = (px * 100.0).round().clamp(1.0, 99.0);
+                        }
+                    }
+                    if ui.selectable_label(!self.quick_limit_mode, RichText::new(tr(l, "Market", "市价成交")).small()).clicked() {
+                        self.quick_limit_mode = false;
+                    }
+                });
+            });
+
+            ui.add_space(10.0);
+
+            // 3. Big Side-by-Side Outcome Cards (Yes / No or Team A / Team B)
+            ui.label(RichText::new(tr(l, "Outcome", "选择方向")).small().color(Color32::from_rgb(138, 154, 178)));
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let n = m.outcomes.len().clamp(1, 2);
+                let btn_w = ((ui.available_width() - 8.0) / n as f32).max(120.0);
+                for (idx, name) in m.outcomes.iter().take(2).enumerate() {
+                    let tid = m.token_ids.get(idx).map(|s| s.as_str());
+                    let px = tid
+                        .and_then(|t| self.core.feed.get_book_view(t, 1))
+                        .and_then(|b| if self.quick_buy { b.best_ask.or(b.mid) } else { b.best_bid.or(b.mid) })
+                        .or_else(|| m.outcome_prices.get(idx).copied());
+                    let active = self.active_outcome_idx == idx;
+                    let col = if idx == 0 { Color32::from_rgb(0, 211, 149) } else { Color32::from_rgb(255, 77, 106) };
+                    let fill = if active {
+                        if idx == 0 { Color32::from_rgba_unmultiplied(0, 211, 149, 42) } else { Color32::from_rgba_unmultiplied(255, 77, 106, 42) }
+                    } else {
+                        Color32::from_rgb(22, 29, 44)
+                    };
+                    let stroke = if active { col } else { Color32::from_rgba_unmultiplied(148, 163, 184, 24) };
+                    let disp_name = self.display_text(name);
+                    let max_c = if polydesk::translate::contains_cjk(&disp_name) { 7 } else { 12 };
+                    let short: String = if disp_name.chars().count() > max_c {
+                        format!("{}…", disp_name.chars().take(max_c - 1).collect::<String>())
+                    } else {
+                        disp_name.clone()
+                    };
+                    let lbl = format!("{short}\n{}", format_odds(px, self.odds_fmt, m.tick_size));
+                    if ui.add_sized(
+                        Vec2::new(btn_w, 48.0),
+                        egui::Button::new(RichText::new(lbl).monospace().strong().size(13.0).color(if active { col } else { Color32::from_rgb(226, 232, 240) }))
+                            .fill(fill)
+                            .stroke(Stroke::new(if active { 1.5 } else { 1.0 }, stroke))
+                            .corner_radius(CornerRadius::same(10)),
+                    ).on_hover_text(&disp_name).clicked() && !active {
+                        self.active_outcome_idx = idx;
+                        self.ladder_state.reset_for_market(m.tick_size);
+                        if let Some(p) = px {
+                            self.quick_limit_cents = (p * 100.0).round().clamp(1.0, 99.0);
+                        }
+                        if let Some(aid) = self.active_asset_id().map(|s| s.to_string()) {
+                            self.trigger_load_history(&aid);
+                        }
+                    }
+                }
+            });
+
+            ui.add_space(12.0);
+
+            // 4. Optional Limit Price Stepper (when Limit mode is selected)
+            if self.quick_limit_mode {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(tr(l, "Limit Price", "限价价格")).small().color(Color32::from_rgb(138, 154, 178)));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let step_c = (m.tick_size * 100.0).max(0.1);
+                        if ui.button(" + ").clicked() {
+                            self.quick_limit_cents = (self.quick_limit_cents + step_c).min(99.5);
+                        }
+                        ui.add(
+                            egui::DragValue::new(&mut self.quick_limit_cents)
+                                .range(0.5..=99.5)
+                                .speed(0.5)
+                                .suffix("¢"),
+                        );
+                        if ui.button(" − ").clicked() {
+                            self.quick_limit_cents = (self.quick_limit_cents - step_c).max(0.5);
+                        }
+                    });
+                });
+                ui.add_space(10.0);
+            }
+
+            // 5. Big Clean Amount Input + Instant Preset Chips
+            ui.horizontal(|ui| {
+                if self.quick_buy {
+                    ui.label(RichText::new(tr(l, "Amount (USD)", "买入金额 ($)")).strong().size(13.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(format!("{}: {}", tr(l, "Balance", "可用"), format_usd(cash, false))).monospace().small().color(Color32::from_rgb(138, 154, 178)));
+                    });
+                } else {
+                    ui.label(RichText::new(tr(l, "Shares to Sell", "卖出份数")).strong().size(13.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(format!("{}: {:.2} sh", tr(l, "Owned", "持仓"), avail_shares)).monospace().small().color(Color32::from_rgb(138, 154, 178)));
+                    });
+                }
+            });
+            ui.add_space(6.0);
+
+            ui.add_sized(
+                Vec2::new(ui.available_width(), 38.0),
+                TextEdit::singleline(&mut self.quick_amount_input)
+                    .font(egui::FontId::monospace(18.0))
+                    .hint_text(if self.quick_buy { "25" } else { "10" }),
+            );
+
+            ui.add_space(6.0);
+
+            let parsed_amt = self.quick_amount_input.trim().parse::<f64>().unwrap_or(0.0).max(0.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if self.quick_buy {
+                    let chip_w = ((ui.available_width() - 24.0) / 5.0).max(52.0);
+                    for add_v in [1.0, 10.0, 50.0, 100.0] {
+                        if ui.add_sized(
+                            Vec2::new(chip_w, 28.0),
+                            egui::Button::new(RichText::new(format!("+${add_v:.0}")).monospace().small())
+                                .fill(Color32::from_rgb(24, 32, 49))
+                                .corner_radius(CornerRadius::same(7)),
+                        ).clicked() {
+                            let next = (parsed_amt + add_v).min(100_000.0);
+                            self.quick_amount_input = format!("{next:.0}");
+                        }
+                    }
+                    if ui.add_sized(
+                        Vec2::new(chip_w, 28.0),
+                        egui::Button::new(RichText::new("Max").monospace().small().color(Color32::from_rgb(56, 189, 248)))
+                            .fill(Color32::from_rgb(24, 32, 49))
+                            .corner_radius(CornerRadius::same(7)),
+                    ).clicked() {
+                        self.quick_amount_input = format!("{:.2}", cash.floor().max(0.0));
+                    }
+                } else {
+                    let chip_w = ((ui.available_width() - 18.0) / 4.0).max(60.0);
+                    for (pct, lbl) in [(0.25, "25%"), (0.50, "50%"), (0.75, "75%"), (1.0, "100%")] {
+                        if ui.add_sized(
+                            Vec2::new(chip_w, 28.0),
+                            egui::Button::new(RichText::new(lbl).monospace().small())
+                                .fill(Color32::from_rgb(24, 32, 49))
+                                .corner_radius(CornerRadius::same(7)),
+                        ).clicked() {
+                            self.quick_amount_input = format!("{:.2}", avail_shares * pct);
+                        }
+                    }
+                }
+            });
+
+            ui.add_space(12.0);
+
+            // 6. Clean Payout & Fee Breakdown Box
+            let exec_px = if self.quick_limit_mode {
+                (self.quick_limit_cents / 100.0).clamp(0.005, 0.995)
+            } else if self.quick_buy {
+                active_book
+                    .and_then(|b| b.best_ask.or(b.mid))
+                    .or_else(|| m.outcome_prices.get(self.active_outcome_idx).copied())
+                    .unwrap_or(0.5)
+            } else {
+                active_book
+                    .and_then(|b| b.best_bid.or(b.mid))
+                    .or_else(|| m.outcome_prices.get(self.active_outcome_idx).copied())
+                    .unwrap_or(0.5)
+            };
+
+            let (est_shares, est_usd) = if self.quick_buy {
+                let sh = if exec_px > 0.001 { parsed_amt / exec_px } else { 0.0 };
+                (sh, parsed_amt)
+            } else {
+                (parsed_amt, parsed_amt * exec_px)
+            };
+            let is_maker = self.quick_limit_mode;
+            let p_fee = estimate_protocol_fee_usd(est_shares, exec_px, is_maker, m.fees_enabled);
+            let b_fee = estimate_builder_fee_usd(
+                est_usd,
+                is_maker,
+                self.account.builder_maker_bps,
+                self.account.builder_taker_bps,
+            );
+            let b_bps = if is_maker { self.account.builder_maker_bps } else { self.account.builder_taker_bps };
+            let to_win = if self.quick_buy { est_shares } else { est_usd };
+            let net_profit = if self.quick_buy { (to_win - est_usd - p_fee - b_fee).max(0.0) } else { 0.0 };
+            let roi_pct = if self.quick_buy && est_usd > 0.01 { (net_profit / est_usd) * 100.0 } else { 0.0 };
+
+            Frame::NONE
+                .fill(Color32::from_rgb(13, 18, 29))
+                .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(148, 163, 184, 18)))
+                .corner_radius(CornerRadius::same(10))
+                .inner_margin(Margin::same(12))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(tr(l, "Avg Price", "预计均价")).small().color(Color32::from_rgb(138, 154, 178)));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(format_odds(Some(exec_px), self.odds_fmt, m.tick_size)).monospace().strong());
+                        });
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(tr(l, "Shares", "预计份数")).small().color(Color32::from_rgb(138, 154, 178)));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(format!("{:.2}", est_shares)).monospace().strong());
+                        });
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("{} ({} {}bp)", tr(l, "Fees", "费率"), HARDCODED_BUILDER_LABEL, b_bps)).small().color(Color32::from_rgb(138, 154, 178)));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(format_usd(p_fee + b_fee, false)).monospace().small().color(Color32::from_rgb(148, 163, 184)));
+                        });
+                    });
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        let lbl = if self.quick_buy { tr(l, "To Win (if settles Yes)", "获胜预期回报") } else { tr(l, "Est. Receive", "预计到账") };
+                        ui.label(RichText::new(lbl).strong().size(13.0));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if self.quick_buy {
+                                ui.label(
+                                    RichText::new(format!("{} (+{:.0}%)", format_usd(to_win, false), roi_pct))
+                                        .monospace()
+                                        .strong()
+                                        .size(15.0)
+                                        .color(Color32::from_rgb(0, 211, 149)),
+                                );
+                            } else {
+                                ui.label(
+                                    RichText::new(format_usd(to_win, false))
+                                        .monospace()
+                                        .strong()
+                                        .size(15.0)
+                                        .color(Color32::from_rgb(248, 250, 252)),
+                                );
+                            }
+                        });
+                    });
+                });
+
+            ui.add_space(12.0);
+
+            // 7. HUGE 1-CLICK BUY / SELL ACTION BUTTON
+            let out_disp = self.display_text(&self.active_outcome_name());
+            let action_lbl = if self.quick_buy {
+                format!("{} {} · {}", tr(l, "Buy", "立即买入"), out_disp, format_usd(est_usd, false))
+            } else {
+                format!("{} {} · {:.1} sh", tr(l, "Sell", "立即卖出"), out_disp, est_shares)
+            };
+            let btn_bg = if self.quick_buy { Color32::from_rgb(0, 198, 140) } else { Color32::from_rgb(244, 63, 94) };
+            let btn_txt = if self.quick_buy { Color32::from_rgb(6, 16, 14) } else { Color32::WHITE };
+
+            if ui.add_sized(
+                Vec2::new(ui.available_width(), 44.0),
+                egui::Button::new(RichText::new(action_lbl).strong().size(15.0).color(btn_txt))
+                    .fill(btn_bg)
+                    .stroke(Stroke::NONE)
+                    .corner_radius(CornerRadius::same(11)),
+            ).clicked() {
+                if est_shares < 0.1 {
+                    self.push_toast(tr(l, "Enter a valid amount first", "请先输入有效金额或份数").into(), true);
+                } else {
+                    let side = if self.quick_buy { "BUY" } else { "SELL" };
+                    let choice = if self.quick_limit_mode { OrderChoice::Gtc } else { OrderChoice::Sweep };
+                    self.place_order_exact(side, exec_px, est_shares, choice);
+                }
+            }
+        });
+
+        // Quick Cash-Out / Position Summary Card right beneath if user holds this market
+        if let Some(pos) = active_pos {
+            ui.add_space(10.0);
+            let mk = active_book.and_then(|b| b.best_bid.or(b.mid)).unwrap_or(pos.avg_entry);
+            let upnl = pos.shares * (mk - pos.avg_entry);
+            let pcol = if upnl >= 0.0 { Color32::from_rgb(0, 211, 149) } else { Color32::from_rgb(255, 77, 106) };
+            surface_card().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(tr(l, "Your Position", "当前持仓")).strong().size(13.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(format_usd(upnl, true)).monospace().strong().size(13.5).color(pcol));
+                    });
+                });
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{} · {:.2} sh @ {} -> {}",
+                        self.display_text(&pos.outcome),
+                        pos.shares,
+                        format_odds(Some(pos.avg_entry), self.odds_fmt, 0.01),
+                        format_odds(Some(mk), self.odds_fmt, 0.01)
+                    ))
+                    .monospace()
+                    .small()
+                    .color(Color32::from_rgb(148, 163, 184)),
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(RichText::new(tr(l, "Cash Out All", "一键全部卖出锁盈")).strong().color(Color32::from_rgb(251, 191, 36))).clicked() {
+                        self.trigger_green_up("close");
+                    }
+                    if ui.button(tr(l, "Free-Roll", "抽本留利润")).clicked() {
+                        self.trigger_green_up("free_roll");
+                    }
+                });
+            });
+        }
+    }
 }
 
 fn install_modern_theme(ctx: &Context) {
     let mut style = (*ctx.global_style()).clone();
     style.spacing.item_spacing = Vec2::new(8.0, 8.0);
-    style.spacing.button_padding = Vec2::new(10.0, 5.5);
-    style.spacing.window_margin = Margin::same(14);
+    style.spacing.button_padding = Vec2::new(11.0, 6.5);
+    style.spacing.window_margin = Margin::same(16);
     style.spacing.scroll.bar_width = 6.0;
 
     let mut v = egui::Visuals::dark();
-    v.panel_fill = Color32::from_rgb(10, 13, 20);
-    v.window_fill = Color32::from_rgb(15, 20, 30);
-    v.extreme_bg_color = Color32::from_rgb(8, 11, 17);
-    v.window_corner_radius = CornerRadius::same(12);
-    v.window_stroke = Stroke::new(1.0, Color32::from_rgb(38, 50, 69));
+    v.panel_fill = Color32::from_rgb(9, 12, 18);
+    v.window_fill = Color32::from_rgb(15, 20, 31);
+    v.extreme_bg_color = Color32::from_rgb(10, 14, 23);
+    v.window_corner_radius = CornerRadius::same(14);
+    v.window_stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(148, 163, 184, 38));
 
-    v.widgets.noninteractive.bg_fill = Color32::from_rgb(18, 24, 36);
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(31, 41, 55));
+    v.widgets.noninteractive.bg_fill = Color32::from_rgb(17, 22, 34);
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(148, 163, 184, 22));
     v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(203, 213, 225));
-    v.widgets.noninteractive.corner_radius = CornerRadius::same(7);
+    v.widgets.noninteractive.corner_radius = CornerRadius::same(9);
 
-    v.widgets.inactive.bg_fill = Color32::from_rgb(22, 30, 45);
-    v.widgets.inactive.weak_bg_fill = Color32::from_rgb(20, 27, 40);
-    v.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(36, 48, 66));
-    v.widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(226, 232, 240));
-    v.widgets.inactive.corner_radius = CornerRadius::same(7);
+    v.widgets.inactive.bg_fill = Color32::from_rgb(22, 29, 44);
+    v.widgets.inactive.weak_bg_fill = Color32::from_rgb(19, 25, 39);
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(148, 163, 184, 24));
+    v.widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(230, 236, 245));
+    v.widgets.inactive.corner_radius = CornerRadius::same(9);
 
-    v.widgets.hovered.bg_fill = Color32::from_rgb(30, 41, 61);
-    v.widgets.hovered.weak_bg_fill = Color32::from_rgb(28, 38, 56);
+    v.widgets.hovered.bg_fill = Color32::from_rgb(30, 40, 60);
+    v.widgets.hovered.weak_bg_fill = Color32::from_rgb(27, 36, 54);
     v.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(56, 189, 248));
-    v.widgets.hovered.corner_radius = CornerRadius::same(7);
+    v.widgets.hovered.corner_radius = CornerRadius::same(9);
 
-    v.widgets.active.bg_fill = Color32::from_rgb(37, 52, 77);
-    v.widgets.active.bg_stroke = Stroke::new(1.0, Color32::from_rgb(56, 189, 248));
-    v.widgets.active.corner_radius = CornerRadius::same(7);
+    v.widgets.active.bg_fill = Color32::from_rgb(37, 50, 76);
+    v.widgets.active.bg_stroke = Stroke::new(1.0, Color32::from_rgb(46, 124, 246));
+    v.widgets.active.corner_radius = CornerRadius::same(9);
 
-    v.selection.bg_fill = Color32::from_rgba_unmultiplied(56, 189, 248, 42);
+    v.selection.bg_fill = Color32::from_rgba_unmultiplied(46, 124, 246, 48);
     v.selection.stroke = Stroke::new(1.0, Color32::from_rgb(56, 189, 248));
 
     style.visuals = v;

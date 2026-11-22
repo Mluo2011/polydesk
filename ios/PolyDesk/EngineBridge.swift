@@ -344,24 +344,55 @@ final class EngineBridge: ObservableObject {
         }
     }
 
-    func loadMarkets(query: String?, category: String) {
+    func loadMarkets(query: String?, category: String, offset: Int = 0, append: Bool = false) {
         var req: [String: Any] = [
             "op": "markets",
             "category": category,
-            "limit": 40,
+            "limit": 80,
+            "offset": offset,
             "lang": zh ? "zh" : "en",
         ]
         if let q = query, !q.isEmpty { req["query"] = q }
         call(req, as: [MarketItem].self) { [weak self] res in
             guard let self else { return }
             if case .success(let list) = res {
-                self.markets = list
+                if append {
+                    for m in list where !self.markets.contains(where: { $0.condition_id == m.condition_id }) {
+                        self.markets.append(m)
+                    }
+                } else {
+                    self.markets = list
+                }
                 if let activeId = self.activeMarket?.condition_id,
-                   let updated = list.first(where: { $0.condition_id == activeId }) {
+                   let updated = self.markets.first(where: { $0.condition_id == activeId }) {
                     self.activeMarket = updated
-                } else if self.activeMarket == nil, let first = list.first {
+                } else if self.activeMarket == nil, let first = self.markets.first {
                     self.selectMarket(first)
                 }
+            }
+        }
+    }
+
+    func placeQuickOrder(side: String, price: Double, shares: Double, isLimit: Bool) {
+        guard let m = activeMarket, let aid = activeAssetId, shares >= 0.1 else { return }
+        let order: [String: Any] = [
+            "asset_id": aid,
+            "condition_id": m.condition_id,
+            "market_question": m.question,
+            "outcome": activeOutcomeIdx < m.outcomes.count ? m.outcomes[activeOutcomeIdx] : "Yes",
+            "side": side,
+            "order_type": isLimit ? "GTC" : "SWEEP",
+            "post_only": false,
+            "price": price,
+            "size": (shares * 100).rounded() / 100,
+            "fees_enabled": m.fees_enabled,
+        ]
+        call(["op": "place_order", "order": order], as: [String: AnyDecodable].self) { [weak self] res in
+            switch res {
+            case .success:
+                self?.showToast("\(side) \(String(format: "%.1f", shares)) @ \(String(format: "%.1f¢", price * 100))")
+            case .failure(let e):
+                self?.showToast(e.localizedDescription)
             }
         }
     }

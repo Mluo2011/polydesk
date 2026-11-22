@@ -17,11 +17,14 @@ struct RootTerminalView: View {
     @Environment(\.horizontalSizeClass) private var hSize
     @State private var showWallet = false
     @State private var showMarketsRail = true
-    @State private var rightMode = 0 // 0 = Ladder, 1 = Pro Orders
+    @State private var rightMode = 0 // 0 = Quick Buy/Sell, 1 = Ladder, 2 = Pro Orders
     @State private var deckTab = 0   // 0 = Positions/Rules, 1 = Whales
     @State private var searchText = ""
+    @State private var marketsOffset = 0
     @State private var selectedTab = 0
 
+    @State private var quickBuy = true
+    @State private var quickAmountText = "25"
     @State private var ruleKind = "stop_loss"
     @State private var triggerCents = 45.0
     @State private var trailCents = 3.0
@@ -50,14 +53,17 @@ struct RootTerminalView: View {
                     Divider().overlay(Color.white.opacity(0.08))
                     VStack(spacing: 8) {
                         Picker("", selection: $rightMode) {
-                            Text(engine.t("Price Ladder", "一键盘口")).tag(0)
-                            Text(engine.t("Pro Orders", "高级条件单")).tag(1)
+                            Text(engine.t("Buy / Sell", "快捷买卖")).tag(0)
+                            Text(engine.t("Ladder", "盘口")).tag(1)
+                            Text(engine.t("Pro", "条件单")).tag(2)
                         }
                         .pickerStyle(.segmented)
                         .padding(.horizontal, 10)
                         .padding(.top, 10)
 
                         if rightMode == 0 {
+                            quickTradePane
+                        } else if rightMode == 1 {
                             LadderView(engine: engine)
                         } else {
                             proOrdersPane
@@ -133,12 +139,19 @@ struct RootTerminalView: View {
                 .cornerRadius(99)
 
             let cash = isLive ? (engine.account?.live_balance_usd ?? 0) : (engine.account?.paper.cash_usd ?? 1000)
-            Text(String(format: "$%.2f", cash))
-                .font(.caption.monospacedDigit().bold())
-                .frame(width: 82, alignment: .trailing)
-                .padding(.horizontal, 8).padding(.vertical, 5)
-                .background(Color.white.opacity(0.05))
-                .cornerRadius(7)
+            let positions = (isLive ? engine.account?.live_positions : engine.account?.paper.positions) ?? []
+            let posVal = positions.reduce(0.0) { $0 + $1.shares * $1.avg_entry }
+            HStack(spacing: 8) {
+                Text("\(engine.t("Portfolio", "总资产")) \(String(format: "$%.2f", cash + posVal))")
+                    .font(.caption.monospacedDigit().bold())
+                    .foregroundColor(.white)
+                Text("\(engine.t("Cash", "余额")) \(String(format: "$%.2f", cash))")
+                    .font(.caption.monospacedDigit().bold())
+                    .foregroundColor(.green)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(Color.white.opacity(0.06))
+            .cornerRadius(8)
 
             if let tel = engine.telemetry {
                 Text(String(format: "CLOB %.0fms", tel.warm_ping_ms.p50))
@@ -241,9 +254,120 @@ struct RootTerminalView: View {
                             .cornerRadius(8)
                         }
                     }
+                    if searchText.isEmpty && !engine.markets.isEmpty {
+                        Button(engine.t("Load More Markets (+80)", "加载更多市场 (+80)")) {
+                            marketsOffset += 80
+                            engine.loadMarkets(query: nil, category: "all", offset: marketsOffset, append: true)
+                        }
+                        .font(.caption.bold())
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(Color.white.opacity(0.06))
+                        .cornerRadius(8)
+                    }
                 }
                 .padding(.horizontal, 10).padding(.bottom, 10)
             }
+        }
+    }
+
+    private var quickTradePane: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Picker("", selection: $quickBuy) {
+                    Text(engine.t("Buy", "买入")).tag(true)
+                    Text(engine.t("Sell", "卖出")).tag(false)
+                }
+                .pickerStyle(.segmented)
+
+                if let m = engine.activeMarket {
+                    HStack(spacing: 8) {
+                        ForEach(Array(m.outcomes.prefix(2).enumerated()), id: \.offset) { idx, _ in
+                            let name = m.displayOutcome(idx, zh: engine.zh)
+                            let staticPx = idx < m.outcome_prices.count ? m.outcome_prices[idx] : nil
+                            let px = (idx == engine.activeOutcomeIdx ? (quickBuy ? engine.book?.best_ask : engine.book?.best_bid) ?? engine.book?.mid : nil) ?? staticPx
+                            Button {
+                                engine.selectMarket(m, outcomeIdx: idx)
+                            } label: {
+                                VStack(spacing: 3) {
+                                    Text(name).font(.caption.bold()).lineLimit(1)
+                                    Text(engine.oddsFmt.format(px, tick: m.tick_size)).font(.subheadline.monospacedDigit().bold())
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                                .background(engine.activeOutcomeIdx == idx ? (idx == 0 ? Color.green.opacity(0.26) : Color.red.opacity(0.26)) : Color.white.opacity(0.06))
+                                .foregroundColor(idx == 0 ? .green : .red)
+                                .cornerRadius(10)
+                            }
+                        }
+                    }
+
+                    let amt = Double(quickAmountText) ?? 0
+                    let px = (quickBuy ? (engine.book?.best_ask ?? engine.book?.mid) : (engine.book?.best_bid ?? engine.book?.mid))
+                        ?? (engine.activeOutcomeIdx < m.outcome_prices.count ? m.outcome_prices[engine.activeOutcomeIdx] : 0.5)
+                    let shares = quickBuy ? (px > 0.001 ? amt / px : 0) : amt
+
+                    Text(quickBuy ? engine.t("Amount ($)", "买入金额 ($)") : engine.t("Shares to Sell", "卖出份数"))
+                        .font(.caption).foregroundColor(.secondary)
+                    TextField("25", text: $quickAmountText)
+                        .keyboardType(.decimalPad)
+                        .font(.title3.monospacedDigit().bold())
+                        .padding(10)
+                        .background(Color.white.opacity(0.06))
+                        .cornerRadius(9)
+
+                    HStack(spacing: 6) {
+                        ForEach([1, 10, 50, 100], id: \.self) { v in
+                            Button("+$\(v)") {
+                                quickAmountText = String(format: "%.0f", amt + Double(v))
+                            }
+                            .font(.caption.monospacedDigit().bold())
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 7)
+                            .background(Color.white.opacity(0.07))
+                            .cornerRadius(7)
+                        }
+                    }
+
+                    VStack(spacing: 6) {
+                        HStack {
+                            Text(engine.t("Avg Price", "预计均价")).foregroundColor(.secondary)
+                            Spacer()
+                            Text(engine.oddsFmt.format(px, tick: m.tick_size)).monospacedDigit().bold()
+                        }
+                        HStack {
+                            Text(engine.t("Est. Shares", "预计份数")).foregroundColor(.secondary)
+                            Spacer()
+                            Text(String(format: "%.2f", shares)).monospacedDigit().bold()
+                        }
+                        HStack {
+                            Text(quickBuy ? engine.t("To Win", "获胜预期回报") : engine.t("Est. Receive", "预计到账")).bold()
+                            Spacer()
+                            Text(String(format: "$%.2f", quickBuy ? shares : shares * px))
+                                .monospacedDigit().bold().foregroundColor(.green)
+                        }
+                    }
+                    .font(.caption)
+                    .padding(12)
+                    .background(Color.white.opacity(0.04))
+                    .cornerRadius(10)
+
+                    Button {
+                        engine.placeQuickOrder(side: quickBuy ? "BUY" : "SELL", price: px, shares: shares, isLimit: false)
+                    } label: {
+                        Text(quickBuy
+                             ? "\(engine.t("Buy", "立即买入")) \(m.displayOutcome(engine.activeOutcomeIdx, zh: engine.zh)) · $\(String(format: "%.0f", amt))"
+                             : "\(engine.t("Sell", "立即卖出")) \(m.displayOutcome(engine.activeOutcomeIdx, zh: engine.zh)) · \(String(format: "%.1f", shares)) sh")
+                            .font(.headline.bold())
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 13)
+                            .background(quickBuy ? Color.green : Color.red)
+                            .foregroundColor(quickBuy ? .black : .white)
+                            .cornerRadius(11)
+                    }
+                }
+            }
+            .padding(12)
         }
     }
 

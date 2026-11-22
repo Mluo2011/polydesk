@@ -160,6 +160,20 @@ impl MarketClient {
         translator: &crate::translate::Translator,
         populate_zh: bool,
     ) -> Result<Vec<MarketSummary>> {
+        self.fetch_markets_page(query, category, limit, 0, translator, populate_zh)
+            .await
+    }
+
+    /// Paginated active markets fetch across ALL Polymarket markets (supports EN + ZH search & offset paging).
+    pub async fn fetch_markets_page(
+        &self,
+        query: Option<&str>,
+        category: Option<&str>,
+        limit: usize,
+        offset: usize,
+        translator: &crate::translate::Translator,
+        populate_zh: bool,
+    ) -> Result<Vec<MarketSummary>> {
         let raw_q = query.unwrap_or("").trim();
         let expanded_queries = if raw_q.is_empty() {
             Vec::new()
@@ -171,14 +185,14 @@ impl MarketClient {
         let fetch_limit = if !raw_q.is_empty()
             || (!cat_lower.is_empty() && cat_lower != "all")
         {
-            (limit * 4).clamp(80, 200)
+            (limit * 3).clamp(120, 250)
         } else {
-            limit.clamp(10, 100)
+            limit.clamp(20, 150)
         };
 
         let url = format!(
-            "{}/markets?active=true&closed=false&limit={}&order=volume24hr&ascending=false",
-            self.gamma_host, fetch_limit
+            "{}/markets?active=true&closed=false&limit={}&offset={}&order=volume24hr&ascending=false",
+            self.gamma_host, fetch_limit, offset
         );
 
         let raw: Vec<Value> = self
@@ -739,14 +753,32 @@ fn infer_category(question: &str, slug: &str, event_title: &str) -> String {
         return "crypto".to_string();
     }
     if [
-        "trump", "biden", "election", "senate", "house", "president", "fed ", "interest rate",
-        "fomc", "cpi", "tariff", "china", "russia", "ukraine", "israel", "iran", "prime minister",
-        "ceasefire", "xi jinping", "nato",
+        "trump", "biden", "election", "senate", "house", "president", "tariff", "china", "russia",
+        "ukraine", "israel", "iran", "prime minister", "ceasefire", "xi jinping", "nato", "war",
+        "congress", "governor", "mayor", "parliament", "supreme court",
     ]
     .iter()
     .any(|k| text.contains(k))
     {
         return "politics".to_string();
+    }
+    if [
+        "fed ", "fomc", "interest rate", "cpi", "inflation", "gdp", "recession", "s&p", "nasdaq",
+        "stock", "gold", "oil", "crude", "nvidia", "tesla", "apple", "ipo", "earnings", "treasury",
+    ]
+    .iter()
+    .any(|k| text.contains(k))
+    {
+        return "finance".to_string();
+    }
+    if [
+        "openai", "gpt", "claude", "gemini", "ai ", "anthropic", "spacex", "starship", "gta",
+        "tiktok", "youtube", "twitter", "x.com", "apple", "google", "microsoft", "meta ", "elon",
+    ]
+    .iter()
+    .any(|k| text.contains(k))
+    {
+        return "tech".to_string();
     }
     "other".to_string()
 }

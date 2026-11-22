@@ -1,4 +1,4 @@
-use egui::{Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
+use egui::{Color32, CornerRadius, FontId, Mesh, Pos2, Rect, Sense, Shape, Stroke, Ui, pos2, vec2};
 
 use polydesk::automation::{AutomationRule, RuleKind};
 use polydesk::book::BookView;
@@ -35,6 +35,7 @@ impl Default for IndicatorConfig {
 }
 
 struct Candle {
+    t: i64,
     o: f64,
     h: f64,
     l: f64,
@@ -59,20 +60,21 @@ pub fn draw_price_chart(
     let (rect, response) = ui.allocate_exact_size(desired, Sense::hover());
     let painter = ui.painter_at(rect);
 
-    painter.rect_filled(rect, CornerRadius::same(10), Color32::from_rgb(13, 18, 28));
+    // Modern deep elevated card surface
+    painter.rect_filled(rect, CornerRadius::same(12), Color32::from_rgb(15, 20, 31));
     painter.rect_stroke(
         rect,
-        CornerRadius::same(10),
-        Stroke::new(1.0, Color32::from_rgb(31, 41, 55)),
+        CornerRadius::same(12),
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(148, 163, 184, 24)),
         egui::StrokeKind::Inside,
     );
 
-    let pad_l = 10.0;
-    let pad_r = 66.0;
-    let pad_t = 12.0;
-    let pad_b = 20.0;
+    let pad_l = 14.0;
+    let pad_r = 68.0;
+    let pad_t = 14.0;
+    let pad_b = 24.0;
     let rsi_h = if indicators.rsi14 && height >= 210.0 { 58.0 } else { 0.0 };
-    let rsi_gap = if rsi_h > 0.0 { 6.0 } else { 0.0 };
+    let rsi_gap = if rsi_h > 0.0 { 8.0 } else { 0.0 };
 
     let plot = Rect::from_min_max(
         pos2(rect.left() + pad_l, rect.top() + pad_t),
@@ -86,12 +88,17 @@ pub fn draw_price_chart(
         painter.text(
             plot.center(),
             egui::Align2::CENTER_CENTER,
-            tr(lang, "Waiting for live Polymarket ticks...", "正在等待 Polymarket 实时行情..."),
-            FontId::proportional(12.0),
+            tr(lang, "Loading live Polymarket chart...", "正在加载 Polymarket 实时走势..."),
+            FontId::proportional(13.0),
             Color32::from_rgb(100, 116, 139),
         );
         return;
     }
+
+    // TRUE timestamp-based X-axis (prevents live ticks from stretching into a weird flat tail!)
+    let min_t = points.iter().map(|pt| pt.t).min().unwrap_or(0);
+    let max_t = points.iter().map(|pt| pt.t).max().unwrap_or(min_t + 1);
+    let span_t = (max_t - min_t).max(1) as f64;
 
     let prices: Vec<f64> = points.iter().map(|pt| pt.p).collect();
     let ema9_vals = indicators.ema9.then(|| compute_ema(&prices, 9));
@@ -114,10 +121,6 @@ pub fn draw_price_chart(
             }
         }
     }
-    if let Some(b) = book {
-        if let Some(bb) = b.best_bid { min_p = min_p.min(bb); }
-        if let Some(ba) = b.best_ask { max_p = max_p.max(ba); }
-    }
     if let Some(pos) = position
         && pos.shares > 1e-6
     {
@@ -131,7 +134,7 @@ pub fn draw_price_chart(
         }
     }
 
-    let span_pad = ((max_p - min_p) * 0.12).max(0.015);
+    let span_pad = ((max_p - min_p) * 0.14).max(0.02);
     min_p = (min_p - span_pad).max(0.001);
     max_p = (max_p + span_pad).min(0.999);
     let range_p = (max_p - min_p).max(0.005);
@@ -139,24 +142,21 @@ pub fn draw_price_chart(
     let y_of = |p: f64| -> f32 {
         plot.top() + (((max_p - p) / range_p) as f32) * plot.height()
     };
-    let x_of_idx = |i: usize, total: usize| -> f32 {
-        if total <= 1 {
-            plot.right()
-        } else {
-            plot.left() + ((i as f32) / ((total - 1) as f32)) * plot.width()
-        }
+    let x_of_t = |t: i64| -> f32 {
+        let frac = ((t - min_t) as f64 / span_t).clamp(0.0, 1.0) as f32;
+        plot.left() + frac * plot.width()
     };
 
-    // Gridlines & right Y-axis
-    let grid_col = Color32::from_rgba_unmultiplied(148, 163, 184, 22);
-    let label_col = Color32::from_rgb(123, 139, 163);
+    // Subtle hairline horizontal gridlines & clean right Y-axis
+    let grid_col = Color32::from_rgba_unmultiplied(148, 163, 184, 16);
+    let label_col = Color32::from_rgb(108, 125, 150);
     for i in 0..=4 {
         let frac = i as f64 / 4.0;
         let y = plot.top() + (frac as f32) * plot.height();
         let p = max_p - frac * range_p;
         painter.line_segment([pos2(plot.left(), y), pos2(plot.right(), y)], Stroke::new(1.0, grid_col));
         painter.text(
-            pos2(plot.right() + 6.0, y),
+            pos2(plot.right() + 8.0, y),
             egui::Align2::LEFT_CENTER,
             format_odds(Some(p), odds_fmt, tick_size),
             FontId::monospace(10.0),
@@ -164,9 +164,11 @@ pub fn draw_price_chart(
         );
     }
 
-    // Bid/Ask spread band
+    // Subtle Bid/Ask spread band
     if let Some(b) = book
         && let (Some(bb), Some(ba)) = (b.best_bid, b.best_ask)
+        && bb >= min_p
+        && ba <= max_p
     {
         let ya = y_of(ba);
         let yb = y_of(bb);
@@ -174,29 +176,29 @@ pub fn draw_price_chart(
             pos2(plot.left(), ya.min(yb)),
             pos2(plot.right(), ya.max(yb).max(ya.min(yb) + 1.5)),
         );
-        painter.rect_filled(band, 0.0, Color32::from_rgba_unmultiplied(56, 189, 248, 20));
+        painter.rect_filled(band, 0.0, Color32::from_rgba_unmultiplied(56, 189, 248, 12));
     }
 
-    // Bollinger Bands (20, 2σ) shaded envelope
+    // Bollinger Bands (20, 2σ) shaded envelope (only when enabled)
     if let Some(ref bb) = bb_vals {
         let mut upper_pts = Vec::new();
         let mut lower_pts = Vec::new();
         for (i, &(lo, hi)) in bb.iter().enumerate() {
             if let (Some(l), Some(h)) = (lo, hi) {
-                let x = x_of_idx(i, bb.len());
+                let x = x_of_t(points[i].t);
                 upper_pts.push(pos2(x, y_of(h)));
                 lower_pts.push(pos2(x, y_of(l)));
             }
         }
-        let bb_fill = Color32::from_rgba_unmultiplied(99, 102, 241, 22);
+        let bb_fill = Color32::from_rgba_unmultiplied(99, 102, 241, 20);
         let bb_stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(129, 140, 248, 120));
         for w in 0..upper_pts.len().saturating_sub(1) {
             let quad = vec![upper_pts[w], upper_pts[w + 1], lower_pts[w + 1], lower_pts[w]];
-            painter.add(egui::Shape::convex_polygon(quad, bb_fill, Stroke::NONE));
+            painter.add(Shape::convex_polygon(quad, bb_fill, Stroke::NONE));
         }
         if upper_pts.len() >= 2 {
-            painter.add(egui::Shape::line(upper_pts, bb_stroke));
-            painter.add(egui::Shape::line(lower_pts, bb_stroke));
+            painter.add(Shape::line(upper_pts, bb_stroke));
+            painter.add(Shape::line(lower_pts, bb_stroke));
         }
     }
 
@@ -204,53 +206,88 @@ pub fn draw_price_chart(
     let dn_col = Color32::from_rgb(255, 77, 106);
     let first_p = prices[0];
     let last_p = *prices.last().unwrap_or(&0.5);
-    let trend_col = if last_p >= first_p { up_col } else { dn_col };
+    let is_up = last_p >= first_p;
+    let trend_col = if is_up { up_col } else { dn_col };
 
     match mode {
         ChartMode::Line => {
-            let poly: Vec<Pos2> = prices
+            let poly: Vec<Pos2> = points
                 .iter()
-                .enumerate()
-                .map(|(i, &p)| pos2(x_of_idx(i, prices.len()), y_of(p)))
+                .map(|pt| pos2(x_of_t(pt.t), y_of(pt.p)))
                 .collect();
-            let fill_col = if last_p >= first_p {
-                Color32::from_rgba_unmultiplied(0, 211, 149, 22)
-            } else {
-                Color32::from_rgba_unmultiplied(255, 77, 106, 22)
-            };
-            for seg in poly.windows(2) {
-                let quad = vec![seg[0], seg[1], pos2(seg[1].x, plot.bottom()), pos2(seg[0].x, plot.bottom())];
-                painter.add(egui::Shape::convex_polygon(quad, fill_col, Stroke::NONE));
+
+            // Smooth GPU hardware-interpolated vertical gradient fill under the line!
+            if poly.len() >= 2 {
+                let top_fill = if is_up {
+                    Color32::from_rgba_unmultiplied(0, 211, 149, 44)
+                } else {
+                    Color32::from_rgba_unmultiplied(255, 77, 106, 44)
+                };
+                let bot_fill = if is_up {
+                    Color32::from_rgba_unmultiplied(0, 211, 149, 0)
+                } else {
+                    Color32::from_rgba_unmultiplied(255, 77, 106, 0)
+                };
+
+                let mut mesh = Mesh::default();
+                for (i, &pt) in poly.iter().enumerate() {
+                    let top_idx = (i * 2) as u32;
+                    let bot_idx = top_idx + 1;
+                    mesh.colored_vertex(pt, top_fill);
+                    mesh.colored_vertex(pos2(pt.x, plot.bottom()), bot_fill);
+                    if i > 0 {
+                        let prev_top = top_idx - 2;
+                        let prev_bot = top_idx - 1;
+                        mesh.add_triangle(prev_top, top_idx, bot_idx);
+                        mesh.add_triangle(prev_top, bot_idx, prev_bot);
+                    }
+                }
+                painter.add(Shape::mesh(mesh));
+
+                // Soft subtle glow stroke underneath main line
+                let glow_col = if is_up {
+                    Color32::from_rgba_unmultiplied(0, 211, 149, 45)
+                } else {
+                    Color32::from_rgba_unmultiplied(255, 77, 106, 45)
+                };
+                painter.add(Shape::line(poly.clone(), Stroke::new(4.5, glow_col)));
+                painter.add(Shape::line(poly.clone(), Stroke::new(2.0, trend_col)));
+
+                // Glowing live endpoint dot (modern Polymarket/Robinhood look!)
+                if let Some(&last_pt) = poly.last() {
+                    painter.circle_filled(last_pt, 7.5, glow_col);
+                    painter.circle_filled(last_pt, 3.8, trend_col);
+                    painter.circle_stroke(last_pt, 3.8, Stroke::new(1.2, Color32::from_rgb(248, 250, 252)));
+                }
             }
-            painter.add(egui::Shape::line(poly, Stroke::new(1.8, trend_col)));
         }
         ChartMode::Candles => {
             let candles = build_candles(points);
             let n = candles.len().max(1);
-            let bar_w = ((plot.width() / n as f32) * 0.66).clamp(3.0, 14.0);
-            for (i, c) in candles.iter().enumerate() {
-                let x = plot.left() + (((i as f32) + 0.5) / n as f32) * plot.width();
+            let bar_w = ((plot.width() / n as f32) * 0.62).clamp(3.0, 14.0);
+            for c in &candles {
+                let x = x_of_t(c.t).clamp(plot.left() + bar_w * 0.5, plot.right() - bar_w * 0.5);
                 let col = if c.c >= c.o { up_col } else { dn_col };
-                painter.line_segment([pos2(x, y_of(c.h)), pos2(x, y_of(c.l))], Stroke::new(1.0, col));
+                painter.line_segment([pos2(x, y_of(c.h)), pos2(x, y_of(c.l))], Stroke::new(1.1, col));
                 let top = y_of(c.o.max(c.c));
                 let bot = y_of(c.o.min(c.c)).max(top + 1.5);
                 painter.rect_filled(
                     Rect::from_min_max(pos2(x - bar_w * 0.5, top), pos2(x + bar_w * 0.5, bot)),
-                    1.0,
+                    2.0,
                     col,
                 );
             }
         }
     }
 
-    // Indicator overlay curves
+    // Optional indicator overlay curves (OFF by default)
     if let Some(ref ema) = ema9_vals {
         let pts: Vec<Pos2> = ema
             .iter()
             .enumerate()
-            .map(|(i, &v)| pos2(x_of_idx(i, ema.len()), y_of(v)))
+            .map(|(i, &v)| pos2(x_of_t(points[i].t), y_of(v)))
             .collect();
-        painter.add(egui::Shape::line(pts, Stroke::new(1.3, Color32::from_rgb(56, 189, 248))));
+        painter.add(Shape::line(pts, Stroke::new(1.4, Color32::from_rgb(56, 189, 248))));
     }
     if indicators.sma20
         && let Some(ref sma) = sma20_vals
@@ -258,22 +295,22 @@ pub fn draw_price_chart(
         let pts: Vec<Pos2> = sma
             .iter()
             .enumerate()
-            .filter_map(|(i, &o)| o.map(|v| pos2(x_of_idx(i, sma.len()), y_of(v))))
+            .filter_map(|(i, &o)| o.map(|v| pos2(x_of_t(points[i].t), y_of(v))))
             .collect();
         if pts.len() >= 2 {
-            painter.add(egui::Shape::line(pts, Stroke::new(1.3, Color32::from_rgb(245, 166, 35))));
+            painter.add(Shape::line(pts, Stroke::new(1.4, Color32::from_rgb(245, 166, 35))));
         }
     }
     if let Some(ref vw) = vwap_vals {
         let pts: Vec<Pos2> = vw
             .iter()
             .enumerate()
-            .map(|(i, &v)| pos2(x_of_idx(i, vw.len()), y_of(v)))
+            .map(|(i, &v)| pos2(x_of_t(points[i].t), y_of(v)))
             .collect();
-        painter.add(egui::Shape::line(pts, Stroke::new(1.2, Color32::from_rgb(192, 132, 252))));
+        painter.add(Shape::line(pts, Stroke::new(1.3, Color32::from_rgb(192, 132, 252))));
     }
 
-    // Indicator legend top-left
+    // Indicator legend top-left (only shown if user toggled at least one indicator on)
     let mut legend = Vec::new();
     if let Some(ref e) = ema9_vals && let Some(&v) = e.last() {
         legend.push((format!("EMA9 {:.1}¢", v * 100.0), Color32::from_rgb(56, 189, 248)));
@@ -293,63 +330,69 @@ pub fn draw_price_chart(
         lx += (txt.len() as f32) * 6.0 + 10.0;
     }
 
-    // Tagged horizontal overlays (Avg Entry, SL, TP, Trailing, Live price)
-    let draw_tag_line = |p: f64, col: Color32, tag: String| {
+    // Subtle dashed horizontal lines for Avg Entry / SL / TP / Trail + Live price pill
+    let draw_dashed_tag = |p: f64, col: Color32, line_alpha: u8, tag: String| {
         let y = y_of(p);
         if y < plot.top() - 4.0 || y > plot.bottom() + 4.0 {
             return;
         }
-        painter.line_segment([pos2(plot.left(), y), pos2(plot.right(), y)], Stroke::new(1.1, col));
-        let badge = Rect::from_min_max(pos2(plot.right() + 2.0, y - 8.0), pos2(rect.right() - 2.0, y + 8.0));
-        painter.rect_filled(badge, 2.0, col);
+        let dash_col = Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), line_alpha);
+        let mut x = plot.left();
+        while x < plot.right() {
+            let x_end = (x + 5.0).min(plot.right());
+            painter.line_segment([pos2(x, y), pos2(x_end, y)], Stroke::new(1.0, dash_col));
+            x += 9.0;
+        }
+        let badge = Rect::from_min_max(pos2(plot.right() + 4.0, y - 9.0), pos2(rect.right() - 4.0, y + 9.0));
+        painter.rect_filled(badge, CornerRadius::same(5), col);
         painter.text(badge.center(), egui::Align2::CENTER_CENTER, tag, FontId::monospace(9.5), Color32::from_rgb(8, 11, 16));
     };
 
     if let Some(pos) = position
         && pos.shares > 1e-6
     {
-        draw_tag_line(pos.avg_entry, Color32::from_rgb(56, 189, 248), format!("AVG {:.1}", pos.avg_entry * 100.0));
+        draw_dashed_tag(pos.avg_entry, Color32::from_rgb(56, 189, 248), 160, format!("AVG {:.1}", pos.avg_entry * 100.0));
     }
     for r in rules {
         if !r.active { continue; }
         match r.kind {
-            RuleKind::StopLoss => draw_tag_line(r.trigger_price, dn_col, format!("SL {:.1}", r.trigger_price * 100.0)),
-            RuleKind::TakeProfit => draw_tag_line(r.trigger_price, up_col, format!("TP {:.1}", r.trigger_price * 100.0)),
-            RuleKind::TrailingStop => draw_tag_line(r.trigger_price, Color32::from_rgb(245, 166, 35), format!("TRL {:.1}", r.trigger_price * 100.0)),
+            RuleKind::StopLoss => draw_dashed_tag(r.trigger_price, dn_col, 160, format!("SL {:.1}", r.trigger_price * 100.0)),
+            RuleKind::TakeProfit => draw_dashed_tag(r.trigger_price, up_col, 160, format!("TP {:.1}", r.trigger_price * 100.0)),
+            RuleKind::TrailingStop => draw_dashed_tag(r.trigger_price, Color32::from_rgb(245, 166, 35), 160, format!("TRL {:.1}", r.trigger_price * 100.0)),
             RuleKind::DripFeed => {}
         }
     }
-    draw_tag_line(last_p, trend_col, format_odds(Some(last_p), odds_fmt, tick_size));
+    draw_dashed_tag(last_p, trend_col, 55, format_odds(Some(last_p), odds_fmt, tick_size));
 
-    // RSI(14) Sub-Pane
+    // RSI(14) Sub-Pane (only when toggled on)
     if let Some(ref rsi) = rsi_vals {
         let r_rect = Rect::from_min_max(
             pos2(plot.left(), plot.bottom() + rsi_gap),
             pos2(plot.right(), rect.bottom() - pad_b),
         );
-        painter.rect_filled(r_rect, 2.0, Color32::from_rgb(8, 12, 18));
-        painter.rect_stroke(r_rect, 2.0, Stroke::new(0.8, Color32::from_rgb(30, 41, 59)), egui::StrokeKind::Inside);
+        painter.rect_filled(r_rect, 6.0, Color32::from_rgb(10, 14, 22));
+        painter.rect_stroke(r_rect, 6.0, Stroke::new(0.8, Color32::from_rgba_unmultiplied(148, 163, 184, 24)), egui::StrokeKind::Inside);
 
         let y_rsi = |v: f64| r_rect.top() + (((100.0 - v.clamp(0.0, 100.0)) / 100.0) as f32) * r_rect.height();
         let y70 = y_rsi(70.0);
         let y30 = y_rsi(30.0);
-        painter.line_segment([pos2(r_rect.left(), y70), pos2(r_rect.right(), y70)], Stroke::new(0.8, Color32::from_rgba_unmultiplied(255, 77, 106, 90)));
-        painter.line_segment([pos2(r_rect.left(), y30), pos2(r_rect.right(), y30)], Stroke::new(0.8, Color32::from_rgba_unmultiplied(0, 211, 149, 90)));
-        painter.text(pos2(r_rect.right() + 6.0, y70), egui::Align2::LEFT_CENTER, "70", FontId::monospace(9.0), Color32::from_rgb(255, 77, 106));
-        painter.text(pos2(r_rect.right() + 6.0, y30), egui::Align2::LEFT_CENTER, "30", FontId::monospace(9.0), Color32::from_rgb(0, 211, 149));
+        painter.line_segment([pos2(r_rect.left(), y70), pos2(r_rect.right(), y70)], Stroke::new(0.8, Color32::from_rgba_unmultiplied(255, 77, 106, 70)));
+        painter.line_segment([pos2(r_rect.left(), y30), pos2(r_rect.right(), y30)], Stroke::new(0.8, Color32::from_rgba_unmultiplied(0, 211, 149, 70)));
+        painter.text(pos2(r_rect.right() + 8.0, y70), egui::Align2::LEFT_CENTER, "70", FontId::monospace(9.0), Color32::from_rgb(255, 77, 106));
+        painter.text(pos2(r_rect.right() + 8.0, y30), egui::Align2::LEFT_CENTER, "30", FontId::monospace(9.0), Color32::from_rgb(0, 211, 149));
 
         let r_pts: Vec<Pos2> = rsi
             .iter()
             .enumerate()
-            .filter_map(|(i, &o)| o.map(|v| pos2(x_of_idx(i, rsi.len()), y_rsi(v))))
+            .filter_map(|(i, &o)| o.map(|v| pos2(x_of_t(points[i].t), y_rsi(v))))
             .collect();
         if r_pts.len() >= 2 {
-            painter.add(egui::Shape::line(r_pts, Stroke::new(1.3, Color32::from_rgb(245, 166, 35))));
+            painter.add(Shape::line(r_pts, Stroke::new(1.4, Color32::from_rgb(245, 166, 35))));
         }
         if let Some(Some(last_r)) = rsi.last() {
             let rc = if *last_r >= 70.0 { dn_col } else if *last_r <= 30.0 { up_col } else { Color32::from_rgb(245, 166, 35) };
             painter.text(
-                pos2(r_rect.left() + 4.0, r_rect.top() + 2.0),
+                pos2(r_rect.left() + 6.0, r_rect.top() + 3.0),
                 egui::Align2::LEFT_TOP,
                 format!("RSI(14) {:.1}", last_r),
                 FontId::monospace(9.5),
@@ -358,42 +401,56 @@ pub fn draw_price_chart(
         }
     }
 
-    // Time axis
+    // Evenly spaced time axis from true min_t..max_t
+    let fmt_str = if span_t > 86_400.0 * 2.0 { "%m/%d" } else { "%H:%M" };
     for i in 0..=4 {
-        let idx = ((i as f64 / 4.0) * ((points.len() - 1) as f64)).round() as usize;
-        let idx = idx.min(points.len() - 1);
-        let dt = chrono::DateTime::from_timestamp(points[idx].t, 0)
-            .map(|d| d.with_timezone(&chrono::Local).format("%H:%M").to_string())
+        let frac = i as f64 / 4.0;
+        let t_lbl = min_t + (frac * span_t).round() as i64;
+        let dt = chrono::DateTime::from_timestamp(t_lbl, 0)
+            .map(|d| d.with_timezone(&chrono::Local).format(fmt_str).to_string())
             .unwrap_or_default();
-        let x = x_of_idx(idx, points.len()).clamp(plot.left() + 18.0, plot.right() - 18.0);
-        painter.text(pos2(x, rect.bottom() - 8.0), egui::Align2::CENTER_CENTER, dt, FontId::monospace(9.5), Color32::from_rgb(100, 116, 139));
+        let x = (plot.left() + (frac as f32) * plot.width()).clamp(plot.left() + 20.0, plot.right() - 20.0);
+        painter.text(pos2(x, rect.bottom() - 10.0), egui::Align2::CENTER_CENTER, dt, FontId::monospace(9.5), Color32::from_rgb(100, 116, 139));
     }
 
-    // Hover crosshair
+    // Hover crosshair (snaps cleanly to nearest timestamp point!)
     if let Some(hover) = response.hover_pos()
         && plot.contains(hover)
     {
-        let frac = ((hover.x - plot.left()) / plot.width()).clamp(0.0, 1.0);
-        let idx = (frac * ((points.len() - 1) as f32)).round() as usize;
-        let pt = &points[idx.min(points.len() - 1)];
-        let cx = x_of_idx(idx, points.len());
+        let target_t = min_t + ((((hover.x - plot.left()) / plot.width()).clamp(0.0, 1.0) as f64) * span_t).round() as i64;
+        let idx = points
+            .binary_search_by_key(&target_t, |pt| pt.t)
+            .unwrap_or_else(|ins| {
+                if ins == 0 {
+                    0
+                } else if ins >= points.len() {
+                    points.len() - 1
+                } else if (points[ins].t - target_t).abs() < (target_t - points[ins - 1].t).abs() {
+                    ins
+                } else {
+                    ins - 1
+                }
+            });
+        let pt = &points[idx];
+        let cx = x_of_t(pt.t);
         let cy = y_of(pt.p);
 
-        let cross_col = Color32::from_rgba_unmultiplied(226, 232, 240, 75);
+        let cross_col = Color32::from_rgba_unmultiplied(226, 232, 240, 60);
         painter.line_segment([pos2(cx, plot.top()), pos2(cx, rect.bottom() - pad_b)], Stroke::new(1.0, cross_col));
         painter.line_segment([pos2(plot.left(), cy), pos2(plot.right(), cy)], Stroke::new(1.0, cross_col));
-        painter.circle_filled(pos2(cx, cy), 3.5, trend_col);
+        painter.circle_filled(pos2(cx, cy), 4.2, trend_col);
+        painter.circle_stroke(pos2(cx, cy), 4.2, Stroke::new(1.5, Color32::WHITE));
 
         let tm = chrono::DateTime::from_timestamp(pt.t, 0)
             .map(|d| d.with_timezone(&chrono::Local).format("%m/%d %H:%M").to_string())
             .unwrap_or_default();
-        let tip = format!("{}  {}", format_odds(Some(pt.p), odds_fmt, tick_size), tm);
-        let bx = (cx + 8.0).min(plot.right() - 122.0).max(plot.left() + 4.0);
-        let by = (cy - 24.0).max(plot.top() + 4.0);
-        let tip_rect = Rect::from_min_size(pos2(bx, by), vec2(120.0, 18.0));
-        painter.rect_filled(tip_rect, 3.0, Color32::from_rgba_unmultiplied(15, 23, 42, 235));
-        painter.rect_stroke(tip_rect, 3.0, Stroke::new(1.0, Color32::from_rgb(51, 65, 85)), egui::StrokeKind::Inside);
-        painter.text(tip_rect.center(), egui::Align2::CENTER_CENTER, tip, FontId::monospace(10.0), Color32::from_rgb(226, 232, 240));
+        let tip = format!("{}  ·  {}", format_odds(Some(pt.p), odds_fmt, tick_size), tm);
+        let bx = (cx + 10.0).min(plot.right() - 144.0).max(plot.left() + 6.0);
+        let by = (cy - 28.0).max(plot.top() + 6.0);
+        let tip_rect = Rect::from_min_size(pos2(bx, by), vec2(138.0, 22.0));
+        painter.rect_filled(tip_rect, CornerRadius::same(6), Color32::from_rgba_unmultiplied(15, 23, 42, 242));
+        painter.rect_stroke(tip_rect, CornerRadius::same(6), Stroke::new(1.0, Color32::from_rgba_unmultiplied(148, 163, 184, 70)), egui::StrokeKind::Inside);
+        painter.text(tip_rect.center(), egui::Align2::CENTER_CENTER, tip, FontId::monospace(10.0), Color32::from_rgb(241, 245, 249));
     }
 }
 
@@ -488,7 +545,7 @@ fn build_candles(pts: &[PricePoint]) -> Vec<Candle> {
                 c.l = c.l.min(pt.p);
                 c.c = pt.p;
             })
-            .or_insert(Candle { o: pt.p, h: pt.p, l: pt.p, c: pt.p });
+            .or_insert(Candle { t: k, o: pt.p, h: pt.p, l: pt.p, c: pt.p });
     }
     map.into_values().collect()
 }

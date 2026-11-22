@@ -58,7 +58,7 @@ pub unsafe extern "C" fn polydesk_start(data_dir_utf8: *const c_char) -> i32 {
 #[serde(tag = "op", rename_all = "snake_case")]
 enum FfiRequest {
     State { active_asset_id: Option<String>, opposite_asset_id: Option<String> },
-    Markets { query: Option<String>, category: Option<String>, limit: Option<usize>, lang: Option<String> },
+    Markets { query: Option<String>, category: Option<String>, limit: Option<usize>, offset: Option<usize>, lang: Option<String> },
     Subscribe { asset_ids: Vec<String> },
     History { token_id: String, interval: Option<String> },
     Whales { condition_id: String },
@@ -151,15 +151,17 @@ fn handle_call(raw: *const c_char) -> Result<Value, String> {
                 query,
                 category,
                 limit,
+                offset,
                 lang,
             } => {
                 let want_zh = lang.as_deref().is_some_and(|s| s.eq_ignore_ascii_case("zh"));
                 let ms = c
                     .market_client
-                    .fetch_markets_bilingual(
+                    .fetch_markets_page(
                         query.as_deref(),
                         category.as_deref(),
-                        limit.unwrap_or(40),
+                        limit.unwrap_or(80),
+                        offset.unwrap_or(0),
                         &c.translator,
                         want_zh,
                     )

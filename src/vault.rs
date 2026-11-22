@@ -293,5 +293,16 @@ mod tests {
         let (pk_direct, m2) = parse_key_or_mnemonic(&w.private_key).unwrap();
         assert_eq!(pk_direct, w.private_key);
         assert!(m2.is_none());
+
+        // Verify true CSPRNG uniqueness across multiple generated wallets
+        let mut addrs = std::collections::HashSet::new();
+        let mut phrases = std::collections::HashSet::new();
+        for _ in 0..5 {
+            let g = generate_local_wallet().unwrap();
+            addrs.insert(g.address);
+            phrases.insert(g.mnemonic.unwrap());
+        }
+        assert_eq!(addrs.len(), 5);
+        assert_eq!(phrases.len(), 5);
     }
 }
