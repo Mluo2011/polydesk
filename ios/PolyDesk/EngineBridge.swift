@@ -199,6 +199,7 @@ private struct StatePayload: Decodable {
     let green_up: GreenUpInfo?
     let rules: [AutoRuleItem]
     let copy_targets: [CopyTargetItem]
+    let alerts: [AlertItem]?
     let telemetry: TelemetrySnap
 }
 
@@ -372,6 +373,14 @@ final class EngineBridge: ObservableObject {
 
     func t(_ en: String, _ cn: String) -> String { zh ? cn : en }
 
+    static func formatOracleUsd(_ v: Double?) -> String {
+        guard let v = v else { return "—" }
+        let a = abs(v)
+        if a >= 100.0 { return String(format: "$%.2f", v) }
+        if a >= 1.0 { return String(format: "$%.3f", v) }
+        return String(format: "$%.4f", v)
+    }
+
     var activeAssetId: String? {
         guard let m = activeMarket else { return nil }
         return activeOutcomeIdx < m.token_ids.count ? m.token_ids[activeOutcomeIdx] : m.token_ids.first
@@ -438,6 +447,13 @@ final class EngineBridge: ObservableObject {
             self.greenUp = s.green_up
             self.rules = s.rules
             self.copyTargets = s.copy_targets
+            if let incoming = s.alerts {
+                let prevActive = Dictionary(self.alerts.map { ($0.id, $0.active) }, uniquingKeysWith: { first, _ in first })
+                for a in incoming where !a.active && a.triggered_at_ms != nil && prevActive[a.id] == true {
+                    self.showToast("🔔 \(a.outcome) · \(a.market_question)")
+                }
+                self.alerts = incoming
+            }
             self.telemetry = s.telemetry
         }
     }
@@ -593,6 +609,12 @@ final class EngineBridge: ObservableObject {
         ]
         call(["op": "add_copy", "req": req], as: CopyTargetItem.self) { [weak self] _ in
             self?.showToast("Tracking whale \(label)")
+        }
+    }
+
+    func removeCopyTarget(_ id: String) {
+        call(["op": "remove_copy", "id": id], as: [String: Bool].self) { [weak self] _ in
+            self?.showToast(self?.t("Removed copy target", "已移除跟单钱包") ?? "")
         }
     }
 
@@ -789,22 +811,41 @@ final class EngineBridge: ObservableObject {
         }
     }
 
-    /// On-chain CTF `split` / `merge` / `redeem` for the active market (LIVE EOA wallets only).
+    /// On-chain CTF `split` / `merge` / `redeem` for the active market (Paper supports Split/Merge; Redeem requires LIVE EOA).
     func executeCtf(action: String, amountUsd: Double) {
         guard let m = activeMarket, m.token_ids.count >= 2 else {
             showToast(t("Select a 2-outcome market", "请选择二元市场"))
             return
         }
+        let isLive = account?.mode == "live"
+        if action == "redeem" && !isLive {
+            showToast(t("Redeem requires LIVE EOA mode", "赎回仅限实盘 EOA 模式"))
+            return
+        }
         let tid0 = m.token_ids[0]
         let tid1 = m.token_ids[1]
-        let positions = (account?.mode == "live" ? account?.live_positions : account?.paper.positions) ?? []
+        let positions = (isLive ? account?.live_positions : account?.paper.positions) ?? []
         let yesShares = positions.first(where: { $0.asset_id == tid0 })?.shares ?? 0
         let noShares = positions.first(where: { $0.asset_id == tid1 })?.shares ?? 0
-        let autoAmount: Double = action == "merge" ? min(yesShares, noShares) : (yesShares + noShares)
-        let amount = amountUsd > 0 ? amountUsd : autoAmount
-        if amount <= 0 {
-            showToast(t("Enter a positive amount", "请输入大于 0 的数量"))
-            return
+        let amount: Double
+        if action == "redeem" {
+            amount = yesShares + noShares
+            if amount <= 0 {
+                showToast(t("No shares to redeem in this market", "当前市场无可赎回持仓"))
+                return
+            }
+        } else if action == "merge" {
+            amount = amountUsd > 0 ? amountUsd : min(yesShares, noShares)
+            if amount <= 0 {
+                showToast(t("Enter a positive amount", "请输入大于 0 的数量"))
+                return
+            }
+        } else {
+            amount = amountUsd
+            if amount <= 0 {
+                showToast(t("Enter a positive amount", "请输入大于 0 的数量"))
+                return
+            }
         }
         let req: [String: Any] = [
             "op": "ctf",

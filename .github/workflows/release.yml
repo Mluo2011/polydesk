@@ -61,7 +61,7 @@ jobs:
               ISCC="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
             fi
             VER="${GITHUB_REF_NAME#v}"
-            if [[ -z "$VER" || "$VER" == "main" ]]; then VER="0.3.0"; fi
+            if [[ -z "$VER" || "$VER" == "main" ]]; then VER="0.3.1"; fi
             MSYS_NO_PATHCONV=1 "$ISCC" "/DMyAppVersion=$VER" packaging/polydesk.iss
           fi
 

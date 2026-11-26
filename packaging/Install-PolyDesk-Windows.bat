@@ -53,7 +53,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 
 rem Register in Windows Settings -> Installed Apps (HKCU, no Admin required)
 reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\PolyDirect" /v "DisplayName" /t REG_SZ /d "PolyDirect" /f >nul
-reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\PolyDirect" /v "DisplayVersion" /t REG_SZ /d "0.3.0" /f >nul
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\PolyDirect" /v "DisplayVersion" /t REG_SZ /d "0.3.1" /f >nul
 reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\PolyDirect" /v "Publisher" /t REG_SZ /d "Dronepilot" /f >nul
 reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\PolyDirect" /v "InstallLocation" /t REG_SZ /d "%APPDIR%" /f >nul
 reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\PolyDirect" /v "DisplayIcon" /t REG_SZ /d "%APPDIR%\polydesk.ico" /f >nul

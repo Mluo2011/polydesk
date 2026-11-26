@@ -193,6 +193,7 @@ pub struct PolyDeskDesktop {
     crypto_open_fetching: HashSet<String>,
     auto_next_round: bool,
     last_rollover_cond: Option<String>,
+    start_slug_pending: Option<String>,
 
     cached_alerts: Vec<PriceAlert>,
     alert_cond_kind: u8,
@@ -331,6 +332,10 @@ impl PolyDeskDesktop {
             crypto_open_fetching: HashSet::new(),
             auto_next_round: false,
             last_rollover_cond: None,
+            start_slug_pending: std::env::var("POLYDIRECT_START_SLUG")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
             cached_alerts,
             alert_cond_kind: 0,
             alert_thresh_cents: 60.0,
@@ -1591,9 +1596,8 @@ impl PolyDeskDesktop {
                         self.markets_offset = 0;
                     }
                     if need_select && let Some(first) = self.markets.first().cloned() {
-                        // QA/screenshot aid: POLYDIRECT_START_SLUG=btc-updown-5m boots
-                        // straight into a live 5m market in single view.
-                        if std::env::var("POLYDIRECT_START_SLUG").is_ok_and(|s| !s.trim().is_empty()) {
+                        // One-shot startup slug helper (cleared once PresetMarketsLoaded picks it).
+                        if self.start_slug_pending.is_some() {
                             self.trigger_load_5m_4up();
                         }
                         self.select_market(first, 0);
@@ -1602,12 +1606,12 @@ impl PolyDeskDesktop {
                 }
                 UiMsg::PresetMarketsLoaded(ms) => {
                     if ms.is_empty() {
+                        self.start_slug_pending = None;
                         self.push_toast(
                             tr(self.lang, "No active 5m crypto markets found right now", "当前暂无活跃 5m 加密货币市场").into(),
                             true,
                         );
-                    } else if let Ok(needle) = std::env::var("POLYDIRECT_START_SLUG")
-                        && !needle.trim().is_empty()
+                    } else if let Some(needle) = self.start_slug_pending.take()
                         && let Some(pick) = ms
                             .iter()
                             .find(|m| m.slug.to_ascii_lowercase().contains(&needle.to_ascii_lowercase()))
@@ -3040,102 +3044,7 @@ impl eframe::App for PolyDeskDesktop {
                     .and_then(|i| self.core.oracle.snapshot(&i.chainlink_symbol));
                 let hero_odds = format_odds(Some(live_px), self.odds_fmt, m.tick_size);
 
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    if stf.is_some() {
-                        let (txt, col) = match oracle_snap.as_ref() {
-                            Some(s) => (
-                                format_oracle_usd(s.spot),
-                                match beat_opt {
-                                    Some(b) if s.spot >= b => pal.green,
-                                    Some(_) => pal.red,
-                                    None => pal.text_primary,
-                                },
-                            ),
-                            None => ("—".to_string(), pal.text_muted),
-                        };
-                        ui.add_sized(
-                            Vec2::new(150.0, 28.0),
-                            egui::Label::new(
-                                RichText::new(txt).monospace().strong().size(22.5).color(col),
-                            ),
-                        );
-                        if let (Some(s), Some(b)) = (oracle_snap.as_ref(), beat_opt) {
-                            let diff = s.spot - b;
-                            let pct = if b.abs() > f64::EPSILON { diff / b * 100.0 } else { 0.0 };
-                            let dcol = if diff >= 0.0 { pal.green } else { pal.red };
-                            ui.add_sized(
-                                Vec2::new(104.0, 22.0),
-                                egui::Label::new(
-                                    RichText::new(format!(
-                                        "{}{:.2} ({}{:.2}%)",
-                                        if diff >= 0.0 { "+" } else { "-" },
-                                        diff.abs(),
-                                        if pct >= 0.0 { "+" } else { "-" },
-                                        pct.abs()
-                                    ))
-                                    .monospace()
-                                    .strong()
-                                    .size(11.5)
-                                    .color(dcol),
-                                ),
-                            );
-                        }
-                        let b_txt = beat_opt.map(format_oracle_usd).unwrap_or_else(|| "—".into());
-                        ui.add_sized(
-                            Vec2::new(140.0, 22.0),
-                            egui::Label::new(
-                                RichText::new(format!("{} {b_txt}", tr(l, "Beat", "基准")))
-                                    .monospace()
-                                    .strong()
-                                    .size(12.0)
-                                    .color(pal.amber),
-                            ),
-                        );
-                        // Share price stays visible, small, right beside the coin price.
-                        let oname = m
-                            .outcomes
-                            .get(self.active_outcome_idx)
-                            .map(|s| display_text_with(l, &self.core.translator, s))
-                            .unwrap_or_else(|| tr(l, "Yes", "是").to_string());
-                        let oname: String = if oname.chars().count() > 8 {
-                            format!("{}…", oname.chars().take(7).collect::<String>())
-                        } else {
-                            oname
-                        };
-                        ui.add_sized(
-                            Vec2::new(104.0, 22.0),
-                            egui::Label::new(
-                                RichText::new(format!("{oname} {hero_odds}"))
-                                    .monospace()
-                                    .small()
-                                    .color(pal.text_muted),
-                            ),
-                        );
-                    } else {
-                        let hero_col = if delta_pts >= 0.0 { pal.green } else { pal.red };
-                        ui.add_sized(
-                            Vec2::new(92.0, 28.0),
-                            egui::Label::new(
-                                RichText::new(&hero_odds)
-                                    .monospace()
-                                    .strong()
-                                    .size(22.5)
-                                    .color(hero_col),
-                            ),
-                        );
-                        ui.add_sized(
-                            Vec2::new(68.0, 22.0),
-                            egui::Label::new(
-                                RichText::new(format!("{}{:.1}%", if delta_pts >= 0.0 { "+" } else { "" }, delta_pts))
-                                    .monospace()
-                                    .strong()
-                                    .size(12.0)
-                                    .color(hero_col),
-                            ),
-                        );
-                    }
-
+                let draw_outcome_pills = |ui: &mut egui::Ui, outcome_switch: &mut Option<(usize, Option<f64>)>| {
                     for (idx, name) in m.outcomes.iter().enumerate() {
                         let tid = m.token_ids.get(idx).map(|s| s.as_str());
                         let px = tid
@@ -3164,24 +3073,133 @@ impl eframe::App for PolyDeskDesktop {
                             name.clone()
                         };
                         let resp = ui.add_sized(
-                            Vec2::new(130.0, 28.0),
+                            Vec2::new(112.0, 26.0),
                             egui::Button::new(RichText::new(lbl).monospace().strong().size(12.0).color(col))
                                 .fill(fill)
                                 .stroke(Stroke::new(1.0, stroke))
                                 .corner_radius(CornerRadius::same(4)),
                         ).on_hover_text(tip);
                         if resp.clicked() && !active {
-                            outcome_switch = Some((idx, px));
+                            *outcome_switch = Some((idx, px));
                         }
                     }
+                };
 
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        ui.selectable_value(&mut self.chart_mode, ChartMode::Oracle, tr(l, "Oracle", "预言机"));
-                        ui.selectable_value(&mut self.chart_mode, ChartMode::Candles, tr(l, "Candles", "K线"));
-                        ui.selectable_value(&mut self.chart_mode, ChartMode::Line, tr(l, "Line", "折线"));
+                if stf.is_some() {
+                    // Two compact rows for 5m / 15m crypto markets so coin spot + Price to Beat
+                    // + share price never collide with Up/Down buttons or Line | Candles | Oracle.
+                    let is_stale = oracle_snap.as_ref().is_none_or(|s| s.stale);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        let (txt, col) = match oracle_snap.as_ref() {
+                            Some(s) => (
+                                format_oracle_usd(s.spot),
+                                if is_stale {
+                                    pal.text_muted
+                                } else {
+                                    match beat_opt {
+                                        Some(b) if s.spot >= b => pal.green,
+                                        Some(_) => pal.red,
+                                        None => pal.text_primary,
+                                    }
+                                },
+                            ),
+                            None => ("—".to_string(), pal.text_muted),
+                        };
+                        ui.label(RichText::new(txt).monospace().strong().size(22.5).color(col));
+                        if let (Some(s), Some(b)) = (oracle_snap.as_ref(), beat_opt) {
+                            let diff = s.spot - b;
+                            let pct = if b.abs() > f64::EPSILON { diff / b * 100.0 } else { 0.0 };
+                            let dcol = if is_stale {
+                                pal.text_muted
+                            } else if diff >= 0.0 {
+                                pal.green
+                            } else {
+                                pal.red
+                            };
+                            ui.label(
+                                RichText::new(format!(
+                                    "{}{:.2} ({}{:.2}%)",
+                                    if diff >= 0.0 { "+" } else { "-" },
+                                    diff.abs(),
+                                    if pct >= 0.0 { "+" } else { "-" },
+                                    pct.abs()
+                                ))
+                                .monospace()
+                                .strong()
+                                .size(12.0)
+                                .color(dcol),
+                            );
+                        }
+                        let oname = m
+                            .outcomes
+                            .get(self.active_outcome_idx)
+                            .map(|s| display_text_with(l, &self.core.translator, s))
+                            .unwrap_or_else(|| tr(l, "Yes", "是").to_string());
+                        let oname: String = if oname.chars().count() > 8 {
+                            format!("{}…", oname.chars().take(7).collect::<String>())
+                        } else {
+                            oname
+                        };
+                        ui.label(
+                            RichText::new(format!("· {oname} {hero_odds}"))
+                                .monospace()
+                                .small()
+                                .color(pal.text_muted),
+                        );
+                        let b_txt = beat_opt.map(format_oracle_usd).unwrap_or_else(|| "—".into());
+                        ui.label(
+                            RichText::new(format!("{} {b_txt}", tr(l, "Price to Beat", "目标基准价")))
+                                .monospace()
+                                .strong()
+                                .size(12.0)
+                                .color(pal.amber),
+                        );
                     });
-                });
+                    ui.add_space(3.0);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        draw_outcome_pills(ui, &mut outcome_switch);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            ui.selectable_value(&mut self.chart_mode, ChartMode::Oracle, tr(l, "Oracle", "预言机"));
+                            ui.selectable_value(&mut self.chart_mode, ChartMode::Candles, tr(l, "Candles", "K线"));
+                            ui.selectable_value(&mut self.chart_mode, ChartMode::Line, tr(l, "Line", "折线"));
+                        });
+                    });
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        let hero_col = if delta_pts >= 0.0 { pal.green } else { pal.red };
+                        ui.add_sized(
+                            Vec2::new(92.0, 28.0),
+                            egui::Label::new(
+                                RichText::new(&hero_odds)
+                                    .monospace()
+                                    .strong()
+                                    .size(22.5)
+                                    .color(hero_col),
+                            ),
+                        );
+                        ui.add_sized(
+                            Vec2::new(68.0, 22.0),
+                            egui::Label::new(
+                                RichText::new(format!("{}{:.1}%", if delta_pts >= 0.0 { "+" } else { "" }, delta_pts))
+                                    .monospace()
+                                    .strong()
+                                    .size(12.0)
+                                    .color(hero_col),
+                            ),
+                        );
+                        draw_outcome_pills(ui, &mut outcome_switch);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            ui.selectable_value(&mut self.chart_mode, ChartMode::Oracle, tr(l, "Oracle", "预言机"));
+                            ui.selectable_value(&mut self.chart_mode, ChartMode::Candles, tr(l, "Candles", "K线"));
+                            ui.selectable_value(&mut self.chart_mode, ChartMode::Line, tr(l, "Line", "折线"));
+                        });
+                    });
+                }
 
                 // Flat hairline Oracle Strip for active 5m / 15m Crypto Up/Down markets
                 if let Some(info) = extract_short_timeframe_info(m) {
@@ -3205,21 +3223,16 @@ impl eframe::App for PolyDeskDesktop {
                         .corner_radius(CornerRadius::same(4))
                         .inner_margin(Margin::symmetric(10, 5))
                         .show(ui, |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.spacing_mut().item_spacing.x = 10.0;
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 8.0;
                                 let is_stale = snap.as_ref().is_none_or(|s| s.stale);
                                 if is_stale {
                                     if let Some(ref s) = snap {
                                         ui.label(
-                                            RichText::new(format!(
-                                                "{}: {} · 60s TWAP: {}",
-                                                tr(l, "Chainlink", "Chainlink"),
-                                                format_oracle_usd(s.spot),
-                                                format_oracle_usd(s.twap_60s),
-                                            ))
-                                            .monospace()
-                                            .small()
-                                            .color(pal.text_muted),
+                                            RichText::new(format!("60s TWAP: {}", format_oracle_usd(s.twap_60s)))
+                                                .monospace()
+                                                .small()
+                                                .color(pal.text_muted),
                                         );
                                     }
                                     ui.label(
@@ -3233,16 +3246,6 @@ impl eframe::App for PolyDeskDesktop {
                                         .color(pal.text_muted),
                                     );
                                 } else if let Some(ref s) = snap {
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "{}: {}",
-                                            tr(l, "Chainlink", "Chainlink实时"),
-                                            format_oracle_usd(s.spot)
-                                        ))
-                                        .monospace()
-                                        .small()
-                                        .color(pal.text_primary),
-                                    );
                                     let delta_str = beat_opt
                                         .map(|b| {
                                             let diff = s.twap_60s - b;
@@ -4843,8 +4846,8 @@ impl PolyDeskDesktop {
                                     let beat = self.crypto_open_prices.get(&cid).copied();
                                     let snap = self.core.oracle.snapshot(&info.chainlink_symbol);
                                     let rem = market_countdown_secs(m, info.slot_ts, info.interval_mins);
-                                    ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = 6.0;
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 5.0;
                                         let b_txt = beat.map(format_oracle_usd).unwrap_or_else(|| "—".into());
                                         ui.label(
                                             RichText::new(format!("Beat {b_txt}"))
@@ -4884,15 +4887,13 @@ impl PolyDeskDesktop {
                                         }
                                         if let Some(sec) = rem {
                                             let c_col = if sec <= 30 { pal.red } else { pal.text_muted };
-                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                ui.label(
-                                                    RichText::new(format!("{:02}:{:02}", sec / 60, sec % 60))
-                                                        .monospace()
-                                                        .small()
-                                                        .strong()
-                                                        .color(c_col),
-                                                );
-                                            });
+                                            ui.label(
+                                                RichText::new(format!("· {:02}:{:02}", sec / 60, sec % 60))
+                                                    .monospace()
+                                                    .small()
+                                                    .strong()
+                                                    .color(c_col),
+                                            );
                                         }
                                     });
                                 }

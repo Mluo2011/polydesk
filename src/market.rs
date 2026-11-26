@@ -592,7 +592,8 @@ impl MarketClient {
         start_iso: &str,
         end_iso: &str,
         variant: &str,
-    ) -> Result<f64> {        let url = format!(
+    ) -> Result<f64> {
+        let url = format!(
             "https://polymarket.com/api/crypto/crypto-price?symbol={}&eventStartTime={}&variant={}&endDate={}",
             urlencoding_simple(&symbol.trim().to_ascii_uppercase()),
             urlencoding_simple(start_iso),

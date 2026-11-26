@@ -70,21 +70,54 @@ struct AlertsPaneView: View {
     }
 }
 
-// MARK: - v0.3.1: On-chain CTF split / merge / redeem
+// MARK: - v0.3.1: CTF split / merge / redeem
 
 struct CtfPaneView: View {
     @ObservedObject var engine: EngineBridge
     @State private var amountText: String = "10"
+    @State private var pendingAction: String? = nil
 
     private var amount: Double {
         Double(amountText.replacingOccurrences(of: ",", with: ".")) ?? 0
     }
 
+    private var marketShares: (yes: Double, no: Double) {
+        guard let m = engine.activeMarket, m.token_ids.count >= 2 else { return (0, 0) }
+        let isLive = engine.account?.mode == "live"
+        let list = (isLive ? engine.account?.live_positions : engine.account?.paper.positions) ?? []
+        let y = list.first(where: { $0.asset_id == m.token_ids[0] })?.shares ?? 0
+        let n = list.first(where: { $0.asset_id == m.token_ids[1] })?.shares ?? 0
+        return (y, n)
+    }
+
+    private func actionTitle(_ act: String) -> String {
+        switch act {
+        case "split": return engine.t("Confirm CTF Split", "确认 CTF 拆分")
+        case "merge": return engine.t("Confirm CTF Merge", "确认 CTF 合并")
+        case "redeem": return engine.t("Confirm CTF Redeem", "确认 CTF 赎回")
+        default: return engine.t("Confirm CTF Action", "确认 CTF 操作")
+        }
+    }
+
+    private func confirmationMessage(_ act: String) -> String {
+        let isLive = engine.account?.mode == "live"
+        let mode = isLive ? engine.t("LIVE EOA · Polygon Mainnet", "实盘 EOA · Polygon 主网") : engine.t("PAPER Simulation", "模拟盘演练")
+        let q = engine.activeMarket?.displayQuestion(zh: engine.zh) ?? "—"
+        let sh = marketShares
+        let amtDesc = act == "redeem"
+            ? String(format: "%.2f %@", sh.yes + sh.no, engine.t("shares", "份"))
+            : String(format: "%.2f", amount)
+        let wallet = engine.account?.wallet_address ?? "—"
+        return "\(mode)\n\(q)\n\(engine.t("Amount", "数量")): \(amtDesc)\n\(engine.t("Wallet", "钱包")): \(wallet)"
+    }
+
     var body: some View {
+        let sh = marketShares
+        let isLive = engine.account?.mode == "live"
         VStack(alignment: .leading, spacing: 8) {
             Text(engine.t(
-                "Mint or burn complete Yes+No sets on-chain. LIVE EOA wallets only — use Cash Out in Paper mode.",
-                "链上铸造/销毁完整 Yes+No 组合，仅限实盘 EOA 钱包；模拟盘请使用市价锁盈。"
+                "Paper mode simulates Split/Merge locally. Live on-chain Split/Merge/Redeem requires an unlocked EOA wallet + POL gas.",
+                "模拟盘支持本地 Split/Merge 演练；实盘链上拆分/合并/赎回需解锁 EOA 钱包并预留 POL 矿工费。"
             ))
             .font(.caption2)
             .foregroundColor(.secondary)
@@ -96,31 +129,36 @@ struct CtfPaneView: View {
                     .textFieldStyle(.roundedBorder)
                     .keyboardType(.decimalPad)
                     .frame(width: 90)
+                if sh.yes + sh.no > 0 {
+                    Text(String(format: "Y %.1f · N %.1f", sh.yes, sh.no))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundColor(.secondary)
+                }
             }
 
             HStack(spacing: 8) {
                 Button(engine.t("Split", "拆分")) {
-                    engine.executeCtf(action: "split", amountUsd: amount)
+                    pendingAction = "split"
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(engine.ctfBusy)
 
                 Button(engine.t("Merge", "合并")) {
-                    engine.executeCtf(action: "merge", amountUsd: amount)
+                    pendingAction = "merge"
                 }
                 .buttonStyle(.bordered)
                 .disabled(engine.ctfBusy)
 
                 Button(engine.t("Redeem", "赎回")) {
-                    engine.executeCtf(action: "redeem", amountUsd: amount)
+                    pendingAction = "redeem"
                 }
                 .buttonStyle(.bordered)
-                .disabled(engine.ctfBusy)
+                .disabled(engine.ctfBusy || !isLive || (sh.yes + sh.no) <= 0)
             }
             .font(.caption.bold())
 
             if engine.ctfBusy {
-                Text(engine.t("Submitting on-chain transaction…", "正在提交链上交易…"))
+                Text(engine.t("Submitting transaction…", "正在提交交易…"))
                     .font(.caption2)
                     .foregroundColor(.orange)
             }
@@ -137,6 +175,25 @@ struct CtfPaneView: View {
                     }
                 }
             }
+        }
+        .alert(
+            actionTitle(pendingAction ?? ""),
+            isPresented: Binding(
+                get: { pendingAction != nil },
+                set: { if !$0 { pendingAction = nil } }
+            )
+        ) {
+            Button(engine.t("Confirm", "确认执行"), role: isLive ? .destructive : nil) {
+                if let act = pendingAction {
+                    pendingAction = nil
+                    engine.executeCtf(action: act, amountUsd: amount)
+                }
+            }
+            Button(engine.t("Cancel", "取消"), role: .cancel) {
+                pendingAction = nil
+            }
+        } message: {
+            Text(confirmationMessage(pendingAction ?? ""))
         }
     }
 }

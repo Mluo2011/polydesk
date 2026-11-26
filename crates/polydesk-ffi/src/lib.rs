@@ -61,6 +61,17 @@ pub unsafe extern "C" fn polydesk_start(data_dir_utf8: *const c_char) -> i32 {
         }
     };
 
+    let alert_assets: Vec<String> = core
+        .alerts
+        .list()
+        .into_iter()
+        .filter(|a| a.active && !a.asset_id.is_empty())
+        .map(|a| a.asset_id)
+        .collect();
+    if !alert_assets.is_empty() {
+        core.feed.subscribe(alert_assets);
+    }
+
     let _ = ENGINE.set(FfiHost {
         rt,
         core,
@@ -188,6 +199,7 @@ fn handle_call(raw: *const c_char) -> Result<Value, String> {
                     "tape": tape,
                     "rules": c.automation.list_rules(),
                     "copy_targets": c.automation.list_copy_targets(),
+                    "alerts": c.alerts.list(),
                     "telemetry": c.telemetry.snapshot(),
                 }))
             }
@@ -412,9 +424,10 @@ fn handle_call(raw: *const c_char) -> Result<Value, String> {
                     };
                     ensure_oracle_watch(&host, &info);
                     let beat = beat_for(&host, &info, &m.condition_id).await;
+                    let end_date = m.end_date.clone();
                     out.push(json!({
                         "market": m,
-                        "oracle": short_frame_json(c, &info, beat, None),
+                        "oracle": short_frame_json(c, &info, beat, end_date.as_deref()),
                     }));
                 }
                 Ok(json!({ "markets": out }))
@@ -429,6 +442,7 @@ fn handle_call(raw: *const c_char) -> Result<Value, String> {
             } => {
                 let cond: AlertCondition =
                     serde_json::from_value(condition).map_err(|e| e.to_string())?;
+                let aid = asset_id.clone();
                 let alert = polydesk::alerts::PriceAlert::new(
                     asset_id,
                     market_question,
@@ -436,9 +450,20 @@ fn handle_call(raw: *const c_char) -> Result<Value, String> {
                     cond,
                     sound_enabled.unwrap_or(true),
                 );
-                Ok(json!({ "alerts": c.alerts.add(alert) }))
+                let list = c.alerts.add(alert);
+                if !aid.is_empty() {
+                    c.feed.subscribe(vec![aid]);
+                }
+                let snapshot = list.clone();
+                let _ = c.execution.update_config_and_save(|cfg| cfg.price_alerts = snapshot);
+                Ok(json!({ "alerts": list }))
             }
-            FfiRequest::RemoveAlert { id } => Ok(json!({ "alerts": c.alerts.remove(&id) })),
+            FfiRequest::RemoveAlert { id } => {
+                let list = c.alerts.remove(&id);
+                let snapshot = list.clone();
+                let _ = c.execution.update_config_and_save(|cfg| cfg.price_alerts = snapshot);
+                Ok(json!({ "alerts": list }))
+            }
             FfiRequest::Ctf { req } => {
                 let res: CtfTxResult =
                     c.execution.execute_ctf(req).await.map_err(|e| e.to_string())?;

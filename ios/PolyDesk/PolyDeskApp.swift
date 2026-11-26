@@ -24,6 +24,7 @@ struct RootTerminalView: View {
     @State private var rightMode = 0 // 0 = Quick Buy/Sell, 1 = Ladder, 2 = Pro Orders
     @State private var deckTab = 0   // 0 = Positions/Rules, 1 = Whales
     @State private var searchText = ""
+    @State private var selectedCategory = "all"
     @State private var marketsOffset = 0
     @State private var selectedTab = 0
 
@@ -182,25 +183,29 @@ struct RootTerminalView: View {
                     .frame(width: 76, alignment: .trailing)
             }
 
-            Spacer()
+            Spacer(minLength: 4)
 
-            Button(lightMode ? engine.t("Dark", "深色") : engine.t("Light", "浅色")) {
-                lightMode.toggle()
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    Button(lightMode ? engine.t("Dark", "深色") : engine.t("Light", "浅色")) {
+                        lightMode.toggle()
+                    }
+                    .font(.caption).buttonStyle(.bordered)
+                    Button(engine.t("5m 4-Up", "5m 四联")) { showGrid = true }
+                        .font(.caption.bold()).buttonStyle(.bordered)
+                    Button(engine.oddsFmt.label) { engine.oddsFmt = engine.oddsFmt.next() }
+                        .font(.caption.monospaced()).buttonStyle(.bordered)
+                    Button(engine.zh ? "EN" : "中文") {
+                        engine.zh.toggle()
+                        engine.loadMarkets(query: searchText.isEmpty ? nil : searchText, category: selectedCategory)
+                    }
+                    .font(.caption).buttonStyle(.bordered)
+                    Button(engine.t("Wallet / Deposit", "钱包 / 充值")) { showWallet = true }
+                        .font(.caption.bold()).buttonStyle(.borderedProminent)
+                    Button(engine.t("Cancel All", "全撤")) { engine.cancelAll() }
+                        .font(.caption.bold()).foregroundColor(.red).buttonStyle(.bordered)
+                }
             }
-            .font(.caption).buttonStyle(.bordered)
-            Button(engine.t("5m 4-Up", "5m 四联")) { showGrid = true }
-                .font(.caption.bold()).buttonStyle(.bordered)
-            Button(engine.oddsFmt.label) { engine.oddsFmt = engine.oddsFmt.next() }
-                .font(.caption.monospaced()).buttonStyle(.bordered)
-            Button(engine.zh ? "EN" : "中文") {
-                engine.zh.toggle()
-                engine.loadMarkets(query: searchText.isEmpty ? nil : searchText, category: "all")
-            }
-            .font(.caption).buttonStyle(.bordered)
-            Button(engine.t("Wallet / Deposit", "钱包 / 充值")) { showWallet = true }
-                .font(.caption.bold()).buttonStyle(.borderedProminent)
-            Button(engine.t("Cancel All", "全撤")) { engine.cancelAll() }
-                .font(.caption.bold()).foregroundColor(.red).buttonStyle(.bordered)
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
         .background(panelBg)
@@ -212,6 +217,9 @@ struct RootTerminalView: View {
             Text(engine.activeMarket?.displayQuestion(zh: engine.zh) ?? engine.t("Select a market", "请选择市场"))
                 .font(.headline)
                 .lineLimit(1)
+            if engine.shortFrame?.active == true {
+                OracleStripView(engine: engine)
+            }
             if let m = engine.activeMarket {
                 HStack(spacing: 8) {
                     ForEach(Array(m.outcomes.enumerated()), id: \.offset) { idx, _ in
@@ -234,25 +242,55 @@ struct RootTerminalView: View {
                     Spacer()
                 }
             }
-            OracleStripView(engine: engine)
         }
         .transaction { $0.animation = nil }
     }
 
     private var marketsPane: some View {
-        VStack(spacing: 8) {
+        let categories: [(id: String, en: String, zh: String)] = [
+            ("all", "All", "全部"),
+            ("5m", "5m", "5m"),
+            ("15m", "15m", "15m"),
+            ("crypto", "Crypto", "加密"),
+            ("sports", "Sports", "体育"),
+            ("politics", "Politics", "政治"),
+        ]
+        return VStack(spacing: 8) {
             HStack {
                 TextField(engine.t("Search EN / 中文...", "搜索市场 (支持中/英文)..."), text: $searchText)
                     .textFieldStyle(.roundedBorder)
-                    .onSubmit { engine.loadMarkets(query: searchText, category: "all") }
+                    .onSubmit {
+                        marketsOffset = 0
+                        engine.loadMarkets(query: searchText, category: selectedCategory)
+                    }
                 Button {
-                    engine.loadMarkets(query: searchText, category: "all")
+                    marketsOffset = 0
+                    engine.loadMarkets(query: searchText, category: selectedCategory)
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
                 .buttonStyle(.bordered)
             }
             .padding([.horizontal, .top], 10)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(categories, id: \.id) { c in
+                        let sel = selectedCategory == c.id
+                        Button(engine.t(c.en, c.zh)) {
+                            selectedCategory = c.id
+                            marketsOffset = 0
+                            engine.loadMarkets(query: searchText.isEmpty ? nil : searchText, category: c.id)
+                        }
+                        .font(.caption2.bold())
+                        .padding(.horizontal, 9).padding(.vertical, 4)
+                        .background(sel ? Color.blue.opacity(0.22) : subtleFill)
+                        .foregroundColor(sel ? .blue : .secondary)
+                        .cornerRadius(99)
+                    }
+                }
+                .padding(.horizontal, 10)
+            }
 
             ScrollView {
                 LazyVStack(spacing: 7) {
@@ -273,7 +311,9 @@ struct RootTerminalView: View {
                                     Text("/").foregroundColor(.secondary)
                                     Text(engine.oddsFmt.format(m.outcome_prices.dropFirst().first, tick: m.tick_size)).foregroundColor(.red)
                                     Spacer()
-                                    Text(String(format: "$%.0fk", m.volume_24hr / 1000)).foregroundColor(.secondary)
+                                    if m.volume_24hr > 0 {
+                                        Text(String(format: "$%.0fk", m.volume_24hr / 1000)).foregroundColor(.secondary)
+                                    }
                                 }
                                 .font(.caption2.monospacedDigit())
                             }
@@ -286,7 +326,7 @@ struct RootTerminalView: View {
                     if searchText.isEmpty && !engine.markets.isEmpty {
                         Button(engine.t("Load More Markets (+80)", "加载更多市场 (+80)")) {
                             marketsOffset += 80
-                            engine.loadMarkets(query: nil, category: "all", offset: marketsOffset, append: true)
+                            engine.loadMarkets(query: nil, category: selectedCategory, offset: marketsOffset, append: true)
                         }
                         .font(.caption.bold())
                         .frame(maxWidth: .infinity)
@@ -426,6 +466,10 @@ struct RootTerminalView: View {
                                     Spacer()
                                     Button(engine.t("Cash Out", "锁盈")) { engine.executeGreenUp(strategy: "close") }
                                         .font(.caption2).buttonStyle(.bordered)
+                                    if p.asset_id == engine.activeAssetId, engine.greenUp?.can_free_roll == true {
+                                        Button(engine.t("Free-Roll", "抽本留利润")) { engine.executeGreenUp(strategy: "free_roll") }
+                                            .font(.caption2).buttonStyle(.bordered)
+                                    }
                                 }
                             }
                         }
@@ -438,25 +482,44 @@ struct RootTerminalView: View {
                             }
                         }
                     }
-                } else if let wf = engine.whales {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text(engine.t("Net Whale Flow", "鲸鱼净流向")).font(.caption.bold())
-                            Spacer()
-                            Text(String(format: "%@$%.0f", wf.net_flow_usd >= 0 ? "+" : "-", abs(wf.net_flow_usd)))
-                                .font(.caption.monospacedDigit().bold())
-                                .foregroundColor(wf.net_flow_usd >= 0 ? .green : .red)
-                        }
-                        ForEach(wf.top_holders.prefix(10)) { h in
-                            let lbl = !h.name.isEmpty ? h.name : (!h.pseudonym.isEmpty ? h.pseudonym : String(h.proxy_wallet.prefix(10)))
-                            HStack {
-                                Text("\(lbl) (\(h.outcome_index == 0 ? "Y" : "N") \(Int(h.amount)))").font(.caption).lineLimit(1)
-                                Spacer()
-                                Button(engine.t("Copy", "跟单")) {
-                                    engine.addCopyTarget(wallet: h.proxy_wallet, label: lbl, mult: 0.05, maxUsd: 25)
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if !engine.copyTargets.isEmpty {
+                            Text(engine.t("Active Copy Targets", "跟单名单")).font(.caption.bold())
+                            ForEach(engine.copyTargets) { tgt in
+                                HStack {
+                                    Text("\(tgt.label) · \(Int(tgt.multiplier * 100))% (max $\(Int(tgt.max_order_usd))) · \(tgt.copied_count)x")
+                                        .font(.caption2.monospacedDigit())
+                                        .lineLimit(1)
+                                    Spacer()
+                                    Button("×") { engine.removeCopyTarget(tgt.id) }
+                                        .foregroundColor(.red)
                                 }
-                                .font(.caption2).buttonStyle(.bordered)
                             }
+                            Divider()
+                        }
+                        if let wf = engine.whales {
+                            HStack {
+                                Text(engine.t("Net Whale Flow", "鲸鱼净流向")).font(.caption.bold())
+                                Spacer()
+                                Text(String(format: "%@$%.0f", wf.net_flow_usd >= 0 ? "+" : "-", abs(wf.net_flow_usd)))
+                                    .font(.caption.monospacedDigit().bold())
+                                    .foregroundColor(wf.net_flow_usd >= 0 ? .green : .red)
+                            }
+                            ForEach(wf.top_holders.prefix(10)) { h in
+                                let lbl = !h.name.isEmpty ? h.name : (!h.pseudonym.isEmpty ? h.pseudonym : String(h.proxy_wallet.prefix(10)))
+                                HStack {
+                                    Text("\(lbl) (\(h.outcome_index == 0 ? "Y" : "N") \(Int(h.amount)))").font(.caption).lineLimit(1)
+                                    Spacer()
+                                    Button(engine.t("Copy", "跟单")) {
+                                        engine.addCopyTarget(wallet: h.proxy_wallet, label: lbl, mult: 0.05, maxUsd: 25)
+                                    }
+                                    .font(.caption2).buttonStyle(.bordered)
+                                }
+                            }
+                        } else if engine.copyTargets.isEmpty {
+                            Text(engine.t("Loading whale holders…", "正在加载鲸鱼持仓…"))
+                                .font(.caption).foregroundColor(.secondary)
                         }
                     }
                 }
