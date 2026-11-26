@@ -19,6 +19,7 @@ struct RootTerminalView: View {
     @Environment(\.horizontalSizeClass) private var hSize
     @Environment(\.colorScheme) private var scheme
     @State private var showWallet = false
+    @State private var showGrid = false
     @State private var showMarketsRail = true
     @State private var rightMode = 0 // 0 = Quick Buy/Sell, 1 = Ladder, 2 = Pro Orders
     @State private var deckTab = 0   // 0 = Positions/Rules, 1 = Whales
@@ -134,6 +135,7 @@ struct RootTerminalView: View {
             }
         }
         .sheet(isPresented: $showWallet) { WalletDepositSheet(engine: engine) }
+        .sheet(isPresented: $showGrid) { Grid4UpView(engine: engine) }
     }
 
     private var topBar: some View {
@@ -186,6 +188,8 @@ struct RootTerminalView: View {
                 lightMode.toggle()
             }
             .font(.caption).buttonStyle(.bordered)
+            Button(engine.t("5m 4-Up", "5m 四联")) { showGrid = true }
+                .font(.caption.bold()).buttonStyle(.bordered)
             Button(engine.oddsFmt.label) { engine.oddsFmt = engine.oddsFmt.next() }
                 .font(.caption.monospaced()).buttonStyle(.bordered)
             Button(engine.zh ? "EN" : "中文") {
@@ -230,6 +234,7 @@ struct RootTerminalView: View {
                     Spacer()
                 }
             }
+            OracleStripView(engine: engine)
         }
         .transaction { $0.animation = nil }
     }
@@ -479,6 +484,14 @@ struct RootTerminalView: View {
                 Button(engine.t("Arm Engine Rule", "部署条件单")) {
                     engine.armRule(kind: ruleKind, side: "SELL", triggerCents: triggerCents, trailCents: trailCents, shares: ruleShares)
                 }
+            }
+
+            Section(engine.t("Price Alerts", "价格预警")) {
+                AlertsPaneView(engine: engine)
+            }
+
+            Section(engine.t("On-chain CTF (LIVE EOA)", "链上 CTF (实盘 EOA)")) {
+                CtfPaneView(engine: engine)
             }
 
             Section(engine.t("Fee Schedule (Dronepilot · Hardcoded)", "透明费率 (Dronepilot · 锁定)")) {

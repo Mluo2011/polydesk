@@ -48,6 +48,20 @@ pub struct ShortTimeframeInfo {
     pub slot_ts: Option<i64>,
 }
 
+/// Seconds left in a 5m / 15m slot: prefers the market's own `end_date`, then the
+/// parsed slug slot timestamp (`slot_ts + interval`).
+pub fn short_timeframe_countdown_secs(
+    end_date: Option<&str>,
+    slot_ts: Option<i64>,
+    interval_mins: u32,
+) -> Option<i64> {
+    let end_ts = end_date
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.timestamp())
+        .or_else(|| slot_ts.map(|s| s + i64::from(interval_mins) * 60))?;
+    Some((end_ts - chrono::Utc::now().timestamp()).max(0))
+}
+
 pub fn short_timeframe_slot(now_secs: i64, interval_secs: i64) -> i64 {
     if interval_secs <= 0 {
         return now_secs;
@@ -103,9 +117,19 @@ fn has_word(haystack: &str, word: &str) -> bool {
 }
 
 pub fn extract_short_timeframe_info(m: &MarketSummary) -> Option<ShortTimeframeInfo> {
-    let slug_l = m.slug.to_ascii_lowercase();
-    let ev_slug_l = m.event_slug.to_ascii_lowercase();
-    let q_l = m.question.to_ascii_lowercase();
+    extract_short_timeframe_info_raw(&m.slug, &m.event_slug, &m.question)
+}
+
+/// Same detection as [`extract_short_timeframe_info`], but from the raw strings so
+/// FFI hosts (iOS) can identify 5m / 15m Up-Down markets without a full summary.
+pub fn extract_short_timeframe_info_raw(
+    slug: &str,
+    event_slug: &str,
+    question: &str,
+) -> Option<ShortTimeframeInfo> {
+    let slug_l = slug.to_ascii_lowercase();
+    let ev_slug_l = event_slug.to_ascii_lowercase();
+    let q_l = question.to_ascii_lowercase();
 
     let (interval_mins, variant, slot_ts) = if slug_l.contains("-updown-5m") || ev_slug_l.contains("-updown-5m") {
         let slot = slug_l
@@ -568,8 +592,7 @@ impl MarketClient {
         start_iso: &str,
         end_iso: &str,
         variant: &str,
-    ) -> Result<f64> {
-        let url = format!(
+    ) -> Result<f64> {        let url = format!(
             "https://polymarket.com/api/crypto/crypto-price?symbol={}&eventStartTime={}&variant={}&endDate={}",
             urlencoding_simple(&symbol.trim().to_ascii_uppercase()),
             urlencoding_simple(start_iso),
@@ -586,6 +609,26 @@ impl MarketClient {
             .text()
             .await?;
         parse_crypto_open_price_json(&body)
+    }
+
+    /// Fetch the “Price to Beat” (slot open price) for a 5m / 15m Up-Down slot
+    /// directly from the slot timestamp, formatting the ISO window internally.
+    pub async fn fetch_crypto_open_price_for_slot(
+        &self,
+        coin: &str,
+        slot_ts: i64,
+        interval_mins: u32,
+        variant: &str,
+    ) -> Result<f64> {
+        let step = i64::from(interval_mins.max(1)) * 60;
+        let start = chrono::DateTime::from_timestamp(slot_ts, 0)
+            .ok_or_else(|| anyhow::anyhow!("invalid slot timestamp {slot_ts}"))?
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let end = chrono::DateTime::from_timestamp(slot_ts + step, 0)
+            .ok_or_else(|| anyhow::anyhow!("invalid slot end timestamp"))?
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        self.fetch_crypto_open_price(coin, &start, &end, variant)
+            .await
     }
 
     pub async fn fetch_event_siblings(&self, event_slug: &str) -> Result<EventSiblings> {
