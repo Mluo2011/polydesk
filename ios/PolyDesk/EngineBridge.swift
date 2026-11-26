@@ -35,6 +35,9 @@ struct MarketItem: Codable, Identifiable {
     let volume_24hr: Double
     let fees_enabled: Bool
     let category: String
+    let event_slug: String?
+    let neg_risk: Bool?
+    let end_date: String?
 
     func displayQuestion(zh: Bool) -> String {
         if zh, let qz = question_zh, !qz.isEmpty { return qz }
@@ -196,6 +199,7 @@ private struct StatePayload: Decodable {
     let green_up: GreenUpInfo?
     let rules: [AutoRuleItem]
     let copy_targets: [CopyTargetItem]
+    let alerts: [AlertItem]?
     let telemetry: TelemetrySnap
 }
 
@@ -248,6 +252,13 @@ final class EngineBridge: ObservableObject {
     @Published var revealedWallet: GeneratedWalletInfo?
     @Published var toast: String?
 
+    // v0.3.1 iOS parity
+    @Published var shortFrame: ShortFrame?
+    @Published var gridMarkets: [GridEntry] = []
+    @Published var alerts: [AlertItem] = []
+    @Published var ctfBusy: Bool = false
+    @Published var lastCtf: CtfResult?
+
     @Published var orderType: String = "GTC"
     @Published var postOnly: Bool = false
     @Published var stakeUsd: Double = 25.0
@@ -256,6 +267,8 @@ final class EngineBridge: ObservableObject {
 
     private let queue = DispatchQueue(label: "com.polydesk.ffi", qos: .userInteractive)
     private var timer: Timer?
+    private var oracleTimer: Timer?
+    private var lastGridLoad: Date = .distantPast
 
     init() {
         let dataPath = Self.prepareSecureDataDirectory()
@@ -265,6 +278,9 @@ final class EngineBridge: ObservableObject {
         loadMarkets(query: nil, category: "all")
         timer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
             self?.pollState()
+        }
+        oracleTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.pollShortFrame()
         }
     }
 
@@ -352,9 +368,18 @@ final class EngineBridge: ObservableObject {
 
     deinit {
         timer?.invalidate()
+        oracleTimer?.invalidate()
     }
 
     func t(_ en: String, _ cn: String) -> String { zh ? cn : en }
+
+    static func formatOracleUsd(_ v: Double?) -> String {
+        guard let v = v else { return "—" }
+        let a = abs(v)
+        if a >= 100.0 { return String(format: "$%.2f", v) }
+        if a >= 1.0 { return String(format: "$%.3f", v) }
+        return String(format: "$%.4f", v)
+    }
 
     var activeAssetId: String? {
         guard let m = activeMarket else { return nil }
@@ -422,6 +447,13 @@ final class EngineBridge: ObservableObject {
             self.greenUp = s.green_up
             self.rules = s.rules
             self.copyTargets = s.copy_targets
+            if let incoming = s.alerts {
+                let prevActive = Dictionary(self.alerts.map { ($0.id, $0.active) }, uniquingKeysWith: { first, _ in first })
+                for a in incoming where !a.active && a.triggered_at_ms != nil && prevActive[a.id] == true {
+                    self.showToast("🔔 \(a.outcome) · \(a.market_question)")
+                }
+                self.alerts = incoming
+            }
             self.telemetry = s.telemetry
         }
     }
@@ -580,6 +612,12 @@ final class EngineBridge: ObservableObject {
         }
     }
 
+    func removeCopyTarget(_ id: String) {
+        call(["op": "remove_copy", "id": id], as: [String: Bool].self) { [weak self] _ in
+            self?.showToast(self?.t("Removed copy target", "已移除跟单钱包") ?? "")
+        }
+    }
+
     func resetPaper(_ bal: Double) {
         call(["op": "reset_paper", "balance": bal], as: AccountSnap.self) { [weak self] res in
             if case .success(let acc) = res { self?.account = acc; self?.showToast("Paper balance reset") }
@@ -669,10 +707,234 @@ final class EngineBridge: ObservableObject {
             }
         }
     }
+
+    // MARK: - v0.3.1 iOS parity: oracle strip, 5m grid, alerts, on-chain CTF
+
+    /// Poll the live Chainlink spot / 60s TWAP / Price-to-Beat for the active 5m or 15m market.
+    func pollShortFrame() {
+        guard let m = activeMarket else {
+            if shortFrame != nil { shortFrame = nil }
+            return
+        }
+        let req: [String: Any] = [
+            "op": "short_timeframe",
+            "slug": m.slug,
+            "event_slug": m.event_slug ?? "",
+            "question": m.question,
+            "condition_id": m.condition_id,
+            "end_date": m.end_date ?? "",
+        ]
+        call(req, as: ShortFrame.self) { [weak self] res in
+            guard let self else { return }
+            switch res {
+            case .success(let f):
+                self.shortFrame = f.active ? f : nil
+                // Keep the 4-up pool fresh so "Next Round" always has the live slot.
+                if f.active, let secs = f.secs_left, secs <= 2,
+                   Date().timeIntervalSince(self.lastGridLoad) > 15 {
+                    self.loadGrid(interval: (f.interval_mins ?? 5) == 15 ? "15m" : "5m")
+                }
+            case .failure:
+                self.shortFrame = nil
+            }
+        }
+    }
+
+    /// Load the 4-up 5m grid (BTC / ETH / SOL / XRP) with per-tile oracle data.
+    func loadGrid(interval: String = "5m") {
+        lastGridLoad = Date()
+        call(["op": "short_timeframe_markets", "interval": interval, "limit": 4], as: GridPayload.self) { [weak self] res in
+            guard let self else { return }
+            switch res {
+            case .success(let p): self.gridMarkets = p.markets
+            case .failure(let e): self.showToast(e.localizedDescription)
+            }
+        }
+    }
+
+    /// Jump to the next slot for the same coin (used by the strip's Next Round button).
+    func advanceNextRound() {
+        guard let m = activeMarket else { return }
+        let coin = String(m.slug.split(separator: "-").first ?? "")
+        if let entry = gridMarkets.first(where: {
+            $0.market.condition_id != m.condition_id
+                && $0.market.slug.hasPrefix(coin)
+                && ($0.oracle.secs_left ?? 0) > 0
+        }) {
+            selectMarket(entry.market)
+            return
+        }
+        loadGrid(interval: (shortFrame?.interval_mins ?? 5) == 15 ? "15m" : "5m")
+        showToast(t("Next round not live yet", "下一轮尚未上线"))
+    }
+
+    func loadAlerts() {
+        call(["op": "alerts"], as: AlertsPayload.self) { [weak self] res in
+            guard let self else { return }
+            switch res {
+            case .success(let p): self.alerts = p.alerts
+            case .failure(let e): self.showToast(e.localizedDescription)
+            }
+        }
+    }
+
+    /// `kind` is `cross_above`, `cross_below` or `spread_above`; `thresholdCents` is in cents.
+    func addAlert(kind: String, thresholdCents: Double) {
+        guard let m = activeMarket, !m.token_ids.isEmpty else {
+            showToast(t("Select a market first", "请先选择市场"))
+            return
+        }
+        let idx = activeOutcomeIdx < m.token_ids.count ? activeOutcomeIdx : 0
+        let req: [String: Any] = [
+            "op": "add_alert",
+            "asset_id": m.token_ids[idx],
+            "market_question": m.question,
+            "outcome": m.displayOutcome(idx, zh: false),
+            "condition": ["kind": kind, "threshold": thresholdCents / 100.0],
+            "sound_enabled": true,
+        ]
+        call(req, as: AlertsPayload.self) { [weak self] res in
+            guard let self else { return }
+            switch res {
+            case .success(let p):
+                self.alerts = p.alerts
+                self.showToast(self.t("Alert armed", "预警已部署"))
+            case .failure(let e): self.showToast(e.localizedDescription)
+            }
+        }
+    }
+
+    func removeAlert(_ id: String) {
+        call(["op": "remove_alert", "id": id], as: AlertsPayload.self) { [weak self] res in
+            guard let self else { return }
+            if case .success(let p) = res { self.alerts = p.alerts }
+        }
+    }
+
+    /// On-chain CTF `split` / `merge` / `redeem` for the active market (Paper supports Split/Merge; Redeem requires LIVE EOA).
+    func executeCtf(action: String, amountUsd: Double) {
+        guard let m = activeMarket, m.token_ids.count >= 2 else {
+            showToast(t("Select a 2-outcome market", "请选择二元市场"))
+            return
+        }
+        let isLive = account?.mode == "live"
+        if action == "redeem" && !isLive {
+            showToast(t("Redeem requires LIVE EOA mode", "赎回仅限实盘 EOA 模式"))
+            return
+        }
+        let tid0 = m.token_ids[0]
+        let tid1 = m.token_ids[1]
+        let positions = (isLive ? account?.live_positions : account?.paper.positions) ?? []
+        let yesShares = positions.first(where: { $0.asset_id == tid0 })?.shares ?? 0
+        let noShares = positions.first(where: { $0.asset_id == tid1 })?.shares ?? 0
+        let amount: Double
+        if action == "redeem" {
+            amount = yesShares + noShares
+            if amount <= 0 {
+                showToast(t("No shares to redeem in this market", "当前市场无可赎回持仓"))
+                return
+            }
+        } else if action == "merge" {
+            amount = amountUsd > 0 ? amountUsd : min(yesShares, noShares)
+            if amount <= 0 {
+                showToast(t("Enter a positive amount", "请输入大于 0 的数量"))
+                return
+            }
+        } else {
+            amount = amountUsd
+            if amount <= 0 {
+                showToast(t("Enter a positive amount", "请输入大于 0 的数量"))
+                return
+            }
+        }
+        let req: [String: Any] = [
+            "op": "ctf",
+            "req": [
+                "action": action,
+                "condition_id": m.condition_id,
+                "market_question": m.question,
+                "yes_asset_id": tid0,
+                "no_asset_id": tid1,
+                "yes_outcome": m.outcomes.first ?? "Yes",
+                "no_outcome": m.outcomes.count > 1 ? m.outcomes[1] : "No",
+                "amount": amount,
+                "yes_shares": yesShares,
+                "no_shares": noShares,
+                "neg_risk": m.neg_risk ?? false,
+            ],
+        ]
+        ctfBusy = true
+        call(req, as: CtfResult.self) { [weak self] res in
+            guard let self else { return }
+            self.ctfBusy = false
+            switch res {
+            case .success(let r):
+                self.lastCtf = r
+                self.showToast(r.summary)
+                self.pollState()
+            case .failure(let e):
+                self.showToast(e.localizedDescription)
+            }
+        }
+    }
+
 }
 
 struct AnyDecodable: Decodable {
     init(from decoder: Decoder) throws {
         let _ = try? decoder.singleValueContainer()
     }
+}
+
+// MARK: - v0.3.1 iOS parity models
+
+struct ShortFrame: Codable {
+    let active: Bool
+    let coin: String?
+    let symbol: String?
+    let interval_mins: Int?
+    let secs_left: Int?
+    let beat: Double?
+    let spot: Double?
+    let twap_60s: Double?
+    let binance_mid: Double?
+    let stale: Bool?
+}
+
+struct GridEntry: Codable, Identifiable {
+    let market: MarketItem
+    let oracle: ShortFrame
+    var id: String { market.condition_id }
+}
+
+struct GridPayload: Codable {
+    let markets: [GridEntry]
+}
+
+struct AlertCond: Codable {
+    let kind: String
+    let threshold: Double
+}
+
+struct AlertItem: Codable, Identifiable {
+    let id: String
+    let asset_id: String
+    let market_question: String
+    let outcome: String
+    let condition: AlertCond
+    let active: Bool
+    let sound_enabled: Bool
+    let triggered_at_ms: Int64?
+}
+
+struct AlertsPayload: Codable {
+    let alerts: [AlertItem]
+}
+
+struct CtfResult: Codable {
+    let action: String
+    let mode_label: String
+    let tx_hash: String?
+    let polygonscan_url: String?
+    let summary: String
 }

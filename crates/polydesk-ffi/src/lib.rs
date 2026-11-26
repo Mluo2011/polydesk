@@ -1,11 +1,17 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use polydesk::CoreEngine;
+use polydesk::alerts::AlertCondition;
 use polydesk::automation::{CreateCopyTargetRequest, CreateRuleRequest};
+use polydesk::ctf::{CtfRequest, CtfTxResult};
 use polydesk::execution::{OrderRequest, ScaleEntryRequest, TradingMode};
+use polydesk::market::{
+    ShortTimeframeInfo, extract_short_timeframe_info, extract_short_timeframe_info_raw,
+    short_timeframe_countdown_secs,
+};
 use polydesk::vault::WalletSignatureType;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -15,6 +21,10 @@ use zeroize::Zeroize;
 struct FfiHost {
     rt: Runtime,
     core: Arc<CoreEngine>,
+    /// Price-to-Beat cache keyed by condition id: `(value, fetched_at)`.
+    beats: Mutex<std::collections::HashMap<String, (Option<f64>, std::time::Instant)>>,
+    /// Chainlink symbols already subscribed in the oracle feed.
+    oracle_syms: Mutex<std::collections::HashSet<String>>,
 }
 
 static ENGINE: OnceLock<FfiHost> = OnceLock::new();
@@ -51,7 +61,23 @@ pub unsafe extern "C" fn polydesk_start(data_dir_utf8: *const c_char) -> i32 {
         }
     };
 
-    let _ = ENGINE.set(FfiHost { rt, core });
+    let alert_assets: Vec<String> = core
+        .alerts
+        .list()
+        .into_iter()
+        .filter(|a| a.active && !a.asset_id.is_empty())
+        .map(|a| a.asset_id)
+        .collect();
+    if !alert_assets.is_empty() {
+        core.feed.subscribe(alert_assets);
+    }
+
+    let _ = ENGINE.set(FfiHost {
+        rt,
+        core,
+        beats: Mutex::new(std::collections::HashMap::new()),
+        oracle_syms: Mutex::new(std::collections::HashSet::new()),
+    });
     0
 }
 
@@ -90,6 +116,33 @@ enum FfiRequest {
     WalletForceLock,
     SyncAllowance,
     DepositAddresses { wallet_addr: String },
+
+    // ---- v0.3.1: iOS parity surface (oracle strip, 5m grid, alerts, CTF) ----
+    ShortTimeframe {
+        slug: String,
+        #[serde(default)]
+        event_slug: String,
+        #[serde(default)]
+        question: String,
+        #[serde(default)]
+        condition_id: String,
+        #[serde(default)]
+        end_date: Option<String>,
+    },
+    ShortTimeframeMarkets {
+        interval: Option<String>,
+        limit: Option<usize>,
+    },
+    Alerts,
+    AddAlert {
+        asset_id: String,
+        market_question: String,
+        outcome: String,
+        condition: Value,
+        sound_enabled: Option<bool>,
+    },
+    RemoveAlert { id: String },
+    Ctf { req: CtfRequest },
 }
 
 #[unsafe(no_mangle)]
@@ -146,6 +199,7 @@ fn handle_call(raw: *const c_char) -> Result<Value, String> {
                     "tape": tape,
                     "rules": c.automation.list_rules(),
                     "copy_targets": c.automation.list_copy_targets(),
+                    "alerts": c.alerts.list(),
                     "telemetry": c.telemetry.snapshot(),
                 }))
             }
@@ -314,6 +368,180 @@ fn handle_call(raw: *const c_char) -> Result<Value, String> {
                     .map_err(|e| e.to_string())?;
                 Ok(json!(dep))
             }
+            FfiRequest::ShortTimeframe {
+                slug,
+                event_slug,
+                question,
+                condition_id,
+                end_date,
+            } => {
+                let info = extract_short_timeframe_info_raw(&slug, &event_slug, &question);
+                match info {
+                    Some(info) => {
+                        ensure_oracle_watch(&host, &info);
+                        let beat = beat_for(&host, &info, &condition_id).await;
+                        Ok(short_frame_json(
+                            c,
+                            &info,
+                            beat,
+                            end_date.as_deref(),
+                        ))
+                    }
+                    None => Ok(json!({ "active": false })),
+                }
+            }
+            FfiRequest::ShortTimeframeMarkets { interval, limit } => {
+                let tag = interval.unwrap_or_else(|| "5m".to_string());
+                let want = limit.unwrap_or(4).clamp(1, 8);
+                let ms = c
+                    .market_client
+                    .fetch_short_timeframe_markets(&tag, 16)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let mut chosen: Vec<_> = Vec::new();
+                for coin in ["btc", "eth", "sol", "xrp"] {
+                    if let Some(m) = ms.iter().find(|cand| {
+                        extract_short_timeframe_info(cand).is_some_and(|i| i.coin == coin)
+                    }) {
+                        chosen.push(m.clone());
+                    }
+                    if chosen.len() >= want {
+                        break;
+                    }
+                }
+                for m in ms {
+                    if chosen.len() >= want {
+                        break;
+                    }
+                    if !chosen.iter().any(|c| c.condition_id == m.condition_id) {
+                        chosen.push(m);
+                    }
+                }
+                let mut out = Vec::with_capacity(chosen.len());
+                for m in chosen {
+                    let Some(info) = extract_short_timeframe_info(&m) else {
+                        continue;
+                    };
+                    ensure_oracle_watch(&host, &info);
+                    let beat = beat_for(&host, &info, &m.condition_id).await;
+                    let end_date = m.end_date.clone();
+                    out.push(json!({
+                        "market": m,
+                        "oracle": short_frame_json(c, &info, beat, end_date.as_deref()),
+                    }));
+                }
+                Ok(json!({ "markets": out }))
+            }
+            FfiRequest::Alerts => Ok(json!({ "alerts": c.alerts.list() })),
+            FfiRequest::AddAlert {
+                asset_id,
+                market_question,
+                outcome,
+                condition,
+                sound_enabled,
+            } => {
+                let cond: AlertCondition =
+                    serde_json::from_value(condition).map_err(|e| e.to_string())?;
+                let aid = asset_id.clone();
+                let alert = polydesk::alerts::PriceAlert::new(
+                    asset_id,
+                    market_question,
+                    outcome,
+                    cond,
+                    sound_enabled.unwrap_or(true),
+                );
+                let list = c.alerts.add(alert);
+                if !aid.is_empty() {
+                    c.feed.subscribe(vec![aid]);
+                }
+                let snapshot = list.clone();
+                let _ = c.execution.update_config_and_save(|cfg| cfg.price_alerts = snapshot);
+                Ok(json!({ "alerts": list }))
+            }
+            FfiRequest::RemoveAlert { id } => {
+                let list = c.alerts.remove(&id);
+                let snapshot = list.clone();
+                let _ = c.execution.update_config_and_save(|cfg| cfg.price_alerts = snapshot);
+                Ok(json!({ "alerts": list }))
+            }
+            FfiRequest::Ctf { req } => {
+                let res: CtfTxResult =
+                    c.execution.execute_ctf(req).await.map_err(|e| e.to_string())?;
+                Ok(json!(res))
+            }
         }
+    })
+}
+
+fn ensure_oracle_watch(host: &FfiHost, info: &ShortTimeframeInfo) {
+    let mut syms = match host.oracle_syms.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    if syms.insert(info.chainlink_symbol.clone()) {
+        host.core.oracle.set_watched_symbols(syms.clone());
+    }
+}
+
+async fn beat_for(
+    host: &FfiHost,
+    info: &ShortTimeframeInfo,
+    condition_id: &str,
+) -> Option<f64> {
+    let Some(slot) = info.slot_ts else {
+        return None;
+    };
+    let cached = {
+        let cache = match host.beats.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        cache.get(condition_id).and_then(|(v, at)| {
+            if at.elapsed() < std::time::Duration::from_secs(20) {
+                Some(*v)
+            } else {
+                None
+            }
+        })
+    };
+    if let Some(v) = cached {
+        return v;
+    }
+    let fetched = host
+        .core
+        .market_client
+        .fetch_crypto_open_price_for_slot(&info.coin, slot, info.interval_mins, info.variant)
+        .await
+        .ok();
+    let mut cache = match host.beats.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    if cache.len() > 512 {
+        cache.clear();
+    }
+    cache.insert(condition_id.to_string(), (fetched, std::time::Instant::now()));
+    fetched
+}
+
+fn short_frame_json(
+    core: &Arc<CoreEngine>,
+    info: &ShortTimeframeInfo,
+    beat: Option<f64>,
+    end_date: Option<&str>,
+) -> Value {
+    let snap = core.oracle.snapshot(&info.chainlink_symbol);
+    let secs_left = short_timeframe_countdown_secs(end_date, info.slot_ts, info.interval_mins);
+    json!({
+        "active": true,
+        "coin": info.coin,
+        "symbol": info.chainlink_symbol,
+        "interval_mins": info.interval_mins,
+        "secs_left": secs_left,
+        "beat": beat,
+        "spot": snap.as_ref().map(|s| s.spot),
+        "twap_60s": snap.as_ref().map(|s| s.twap_60s),
+        "binance_mid": snap.as_ref().and_then(|s| s.binance_mid),
+        "stale": snap.as_ref().map(|s| s.stale).unwrap_or(true),
     })
 }

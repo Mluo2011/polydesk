@@ -22,7 +22,7 @@ Pure native local apps sharing one ultra-low-latency Rust CLOB V2 engine across 
 2. Your **Dronepilot** Builder Code (`0x8b258cc9a239e2ebf724bd4097bcf3dbecd2d53ca28a7a74959fe48087135e5d`) is permanently compiled into every native binary (Linux, Windows 10/11, macOS, and iOS/iPadOS) — no GitHub Action variables or local config editing required.
 3. Tag a release:
    ```bash
-   git tag v0.3.0 && git push origin v0.3.0
+   git tag v0.3.1 && git push origin v0.3.1
    ```
 4. GitHub Actions (`.github/workflows/release.yml`) automatically builds and publishes:
    - `PolyDirect-Setup.exe` / `polydirect-windows-x86_64.exe` (Windows 10/11 — double-click to install or run!)
