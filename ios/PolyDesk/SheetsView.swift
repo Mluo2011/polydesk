@@ -115,7 +115,7 @@ struct WalletDepositSheet: View {
                                 "在本机随机生成全新 Polygon 地址 + 12 词助记词 + 私钥，并自动生成专属 USDT / USDC 直充地址。"
                             ))
                             .font(.caption).foregroundColor(.secondary)
-                            SecureField(engine.t("Vault Password (min 6 chars)", "设置加密密码 (≥6位)"), text: $vaultPass)
+                            SecureField(engine.t("Vault Password (min 12 chars)", "设置加密密码 (≥12位)"), text: $vaultPass)
                             Button(engine.t("Generate Random Local Wallet", "一键生成随机本地钱包")) {
                                 engine.createNewWallet(password: vaultPass)
                                 vaultPass = ""
@@ -130,7 +130,7 @@ struct WalletDepositSheet: View {
                             }
                             SecureField(engine.t("Private Key (0x...) or 12-word Phrase", "私钥 (0x...) 或 12词助记词"), text: $pk)
                             TextField("Funder / Proxy (optional)", text: $funder)
-                            SecureField(engine.t("Vault Password (min 6 chars)", "加密库密码 (≥6位)"), text: $vaultPass)
+                            SecureField(engine.t("Vault Password (min 12 chars)", "加密库密码 (≥12位)"), text: $vaultPass)
                             Button(engine.t("Authenticate & Unlock LIVE", "认证并解锁实盘")) {
                                 let k = pk
                                 let p = vaultPass

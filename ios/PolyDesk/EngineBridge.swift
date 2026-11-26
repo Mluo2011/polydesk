@@ -258,14 +258,96 @@ final class EngineBridge: ObservableObject {
     private var timer: Timer?
 
     init() {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path ?? ""
-        docs.withCString { ptr in
+        let dataPath = Self.prepareSecureDataDirectory()
+        dataPath.withCString { ptr in
             _ = polydesk_start(ptr)
         }
         loadMarkets(query: nil, category: "all")
         timer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
             self?.pollState()
         }
+    }
+
+    private static func prepareSecureDataDirectory() -> String {
+        let fm = FileManager.default
+        let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? fm.urls(for: .documentDirectory, in: .userDomainMask).first!
+        var dataDir = appSupport.appendingPathComponent("PolyDirect", isDirectory: true)
+        let dirAlreadyExisted = fm.fileExists(atPath: dataDir.path)
+        try? fm.createDirectory(at: dataDir, withIntermediateDirectories: true)
+
+        var dirVals = URLResourceValues()
+        dirVals.isExcludedFromBackup = true
+        try? dataDir.setResourceValues(dirVals)
+
+        let legacyAppSupportDir = appSupport.appendingPathComponent("PolyDesk", isDirectory: true)
+        if !dirAlreadyExisted && fm.fileExists(atPath: legacyAppSupportDir.path) {
+            for filename in ["vault.json", "config.toml"] {
+                let legacyUrl = legacyAppSupportDir.appendingPathComponent(filename)
+                var destUrl = dataDir.appendingPathComponent(filename)
+                if fm.fileExists(atPath: legacyUrl.path) && !fm.fileExists(atPath: destUrl.path) {
+                    do {
+                        try fm.copyItem(at: legacyUrl, to: destUrl)
+                        var fileVals = URLResourceValues()
+                        fileVals.isExcludedFromBackup = true
+                        try? destUrl.setResourceValues(fileVals)
+                    } catch {
+                        // Keep legacy file intact if copy failed
+                    }
+                }
+            }
+        }
+
+        if let docsDir = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
+            for filename in ["vault.json", "config.toml"] {
+                let legacyUrl = docsDir.appendingPathComponent(filename)
+                var destUrl = dataDir.appendingPathComponent(filename)
+                if fm.fileExists(atPath: legacyUrl.path) {
+                    if !fm.fileExists(atPath: destUrl.path) {
+                        do {
+                            try fm.copyItem(at: legacyUrl, to: destUrl)
+                            var fileVals = URLResourceValues()
+                            fileVals.isExcludedFromBackup = true
+                            try? destUrl.setResourceValues(fileVals)
+                            try? fm.removeItem(at: legacyUrl)
+                        } catch {
+                            // Keep legacy file if copy failed
+                        }
+                    } else {
+                        var fileVals = URLResourceValues()
+                        fileVals.isExcludedFromBackup = true
+                        try? destUrl.setResourceValues(fileVals)
+                        let legacyData = try? Data(contentsOf: legacyUrl)
+                        let destData = try? Data(contentsOf: destUrl)
+                        if let ld = legacyData, let dd = destData, ld == dd {
+                            try? fm.removeItem(at: legacyUrl)
+                        } else {
+                            var backupUrl = dataDir.appendingPathComponent("\(filename).legacy-backup")
+                            if fm.fileExists(atPath: backupUrl.path) {
+                                backupUrl = dataDir.appendingPathComponent("\(filename).legacy-backup-\(Int(Date().timeIntervalSince1970))")
+                            }
+                            do {
+                                try fm.moveItem(at: legacyUrl, to: backupUrl)
+                                var bakVals = URLResourceValues()
+                                bakVals.isExcludedFromBackup = true
+                                try? backupUrl.setResourceValues(bakVals)
+                            } catch {
+                                do {
+                                    try fm.copyItem(at: legacyUrl, to: backupUrl)
+                                    var bakVals = URLResourceValues()
+                                    bakVals.isExcludedFromBackup = true
+                                    try? backupUrl.setResourceValues(bakVals)
+                                    try? fm.removeItem(at: legacyUrl)
+                                } catch {
+                                    // Keep differing legacy file intact if backup failed
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return dataDir.path
     }
 
     deinit {
@@ -313,7 +395,7 @@ final class EngineBridge: ObservableObject {
                     if env.ok, let d = env.data {
                         completion(.success(d))
                     } else {
-                        completion(.failure(NSError(domain: "PolyDesk", code: 1, userInfo: [NSLocalizedDescriptionKey: env.error ?? "Unknown error"])))
+                        completion(.failure(NSError(domain: "PolyDirect", code: 1, userInfo: [NSLocalizedDescriptionKey: env.error ?? "Unknown error"])))
                     }
                 }
             } catch {
@@ -560,7 +642,13 @@ final class EngineBridge: ObservableObject {
 
     func lockWallet() {
         call(["op": "wallet_lock"], as: AccountSnap.self) { [weak self] res in
-            if case .success(let acc) = res { self?.account = acc; self?.showToast("Locked (PAPER mode)") }
+            switch res {
+            case .success(let acc):
+                self?.account = acc
+                self?.showToast("Locked (PAPER mode)")
+            case .failure(let e):
+                self?.showToast(e.localizedDescription)
+            }
         }
     }
 

@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-/// Start the in-process Rust PolyDesk CLOB V2 engine using `data_dir` (iOS Documents directory)
+/// Start the in-process Rust PolyDirect CLOB V2 engine using `data_dir` (iOS Application Support directory)
 /// for local config and encrypted wallet vault storage. Returns 0 on success.
 int32_t polydesk_start(const char *data_dir_utf8);
 

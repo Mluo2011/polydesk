@@ -31,9 +31,136 @@ pub struct MarketSummary {
     pub neg_risk: bool,
     pub fees_enabled: bool,
     pub accepting_orders: bool,
+    #[serde(default)]
+    pub event_start_time: Option<String>,
     pub end_date: Option<String>,
     pub image: Option<String>,
     pub category: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShortTimeframeInfo {
+    pub coin: String,
+    pub chainlink_symbol: String,
+    pub binance_symbol: String,
+    pub interval_mins: u32,
+    pub variant: &'static str,
+    pub slot_ts: Option<i64>,
+}
+
+pub fn short_timeframe_slot(now_secs: i64, interval_secs: i64) -> i64 {
+    if interval_secs <= 0 {
+        return now_secs;
+    }
+    now_secs.div_euclid(interval_secs) * interval_secs
+}
+
+pub fn deterministic_updown_slug(coin: &str, interval_mins: u32, now_secs: i64) -> String {
+    let interval_secs = i64::from(interval_mins.max(1)) * 60;
+    let slot = short_timeframe_slot(now_secs, interval_secs);
+    format!("{}-updown-{}m-{slot}", coin.to_ascii_lowercase(), interval_mins)
+}
+
+pub fn next_updown_slug(slug: &str, now_secs: i64) -> Option<String> {
+    let lower = slug.trim().to_ascii_lowercase();
+    let (coin, rest, interval_mins) = if let Some((c, r)) = lower.split_once("-updown-5m-") {
+        (c, r, 5_u32)
+    } else if let Some((c, r)) = lower.split_once("-updown-15m-") {
+        (c, r, 15_u32)
+    } else {
+        return None;
+    };
+    let slot = rest.split('-').next()?.parse::<i64>().ok()?;
+    let step = i64::from(interval_mins) * 60;
+    let next_slot = (slot + step).max(short_timeframe_slot(now_secs, step));
+    Some(format!("{coin}-updown-{interval_mins}m-{next_slot}"))
+}
+
+fn detect_crypto_coin(text_lower: &str) -> Option<&'static str> {
+    if text_lower.contains("btc-updown-") || text_lower.contains("bitcoin") || has_word(text_lower, "btc") {
+        Some("btc")
+    } else if text_lower.contains("eth-updown-") || text_lower.contains("ethereum") || has_word(text_lower, "eth") {
+        Some("eth")
+    } else if text_lower.contains("sol-updown-") || text_lower.contains("solana") || has_word(text_lower, "sol") {
+        Some("sol")
+    } else if text_lower.contains("xrp-updown-") || has_word(text_lower, "xrp") {
+        Some("xrp")
+    } else if text_lower.contains("doge-updown-") || has_word(text_lower, "doge") {
+        Some("doge")
+    } else if text_lower.contains("bnb-updown-") || has_word(text_lower, "bnb") {
+        Some("bnb")
+    } else if text_lower.contains("hype-updown-") || has_word(text_lower, "hype") {
+        Some("hype")
+    } else {
+        None
+    }
+}
+
+fn has_word(haystack: &str, word: &str) -> bool {
+    haystack
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|tok| tok == word)
+}
+
+pub fn extract_short_timeframe_info(m: &MarketSummary) -> Option<ShortTimeframeInfo> {
+    let slug_l = m.slug.to_ascii_lowercase();
+    let ev_slug_l = m.event_slug.to_ascii_lowercase();
+    let q_l = m.question.to_ascii_lowercase();
+
+    let (interval_mins, variant, slot_ts) = if slug_l.contains("-updown-5m") || ev_slug_l.contains("-updown-5m") {
+        let slot = slug_l
+            .split("-updown-5m-")
+            .nth(1)
+            .or_else(|| ev_slug_l.split("-updown-5m-").nth(1))
+            .and_then(|s| s.split('-').next()?.parse::<i64>().ok());
+        (5_u32, "fiveminute", slot)
+    } else if slug_l.contains("-updown-15m") || ev_slug_l.contains("-updown-15m") {
+        let slot = slug_l
+            .split("-updown-15m-")
+            .nth(1)
+            .or_else(|| ev_slug_l.split("-updown-15m-").nth(1))
+            .and_then(|s| s.split('-').next()?.parse::<i64>().ok());
+        (15_u32, "fifteen", slot)
+    } else if (q_l.contains("up or down") || q_l.contains("updown"))
+        && (q_l.contains("5 min") || q_l.contains("5m") || q_l.contains(":05") || q_l.contains("5-min"))
+    {
+        (5_u32, "fiveminute", None)
+    } else if (q_l.contains("up or down") || q_l.contains("updown"))
+        && (q_l.contains("15 min") || q_l.contains("15m") || q_l.contains("15-min"))
+    {
+        (15_u32, "fifteen", None)
+    } else {
+        return None;
+    };
+
+    let combined = format!("{slug_l} {ev_slug_l} {q_l}");
+    let coin = detect_crypto_coin(&combined)?;
+    Some(ShortTimeframeInfo {
+        coin: coin.to_string(),
+        chainlink_symbol: format!("{coin}/usd"),
+        binance_symbol: format!("{coin}usdt"),
+        interval_mins,
+        variant,
+        slot_ts,
+    })
+}
+
+pub fn parse_crypto_open_price_json(body: &str) -> Result<f64> {
+    let val: Value = serde_json::from_str(body).context("invalid crypto-price JSON")?;
+    let raw = val
+        .get("openPrice")
+        .or_else(|| val.get("open_price"))
+        .ok_or_else(|| anyhow::anyhow!("missing openPrice field"))?;
+    let px = match raw {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+    .ok_or_else(|| anyhow::anyhow!("invalid openPrice value"))?;
+    if !px.is_finite() || px <= 0.0 {
+        return Err(anyhow::anyhow!("non-positive openPrice: {px}"));
+    }
+    Ok(px)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,7 +252,11 @@ impl MarketClient {
             .tcp_nodelay(true)
             .tcp_keepalive(Duration::from_secs(30))
             .timeout(Duration::from_secs(12))
-            .user_agent("PolyDesk/0.1 (low-latency-terminal)")
+            .user_agent(concat!(
+                "PolyDirect/",
+                env!("CARGO_PKG_VERSION"),
+                " (low-latency-terminal)"
+            ))
             .build()?;
 
         Ok(Self {
@@ -182,6 +313,17 @@ impl MarketClient {
         };
         let cat_lower = category.unwrap_or("all").trim().to_lowercase();
 
+        if cat_lower == "5m" || cat_lower == "15m" {
+            let mut out = self.fetch_short_timeframe_markets(&cat_lower, limit).await?;
+            if !expanded_queries.is_empty() {
+                out.retain(|m| market_matches_queries(m, &expanded_queries, translator));
+            }
+            if populate_zh && !out.is_empty() {
+                populate_market_translations(&mut out, translator).await;
+            }
+            return Ok(out);
+        }
+
         let fetch_limit = if !raw_q.is_empty()
             || (!cat_lower.is_empty() && cat_lower != "all")
         {
@@ -211,46 +353,10 @@ impl MarketClient {
                 if !m.accepting_orders || m.token_ids.is_empty() {
                     continue;
                 }
-                if !expanded_queries.is_empty() {
-                    let hay_en = format!(
-                        "{} {} {} {} {}",
-                        m.question.to_lowercase(),
-                        m.slug.to_lowercase(),
-                        m.event_title.to_lowercase(),
-                        m.category.to_lowercase(),
-                        m.outcomes.join(" ").to_lowercase()
-                    );
-                    let hay_zh = translator
-                        .get_zh(&m.question)
-                        .unwrap_or_default()
-                        .to_lowercase();
-
-                    let matched = expanded_queries.iter().any(|cand| {
-                        let cl = cand.to_lowercase();
-                        if hay_en.contains(&cl) || (!hay_zh.is_empty() && hay_zh.contains(&cl)) {
-                            return true;
-                        }
-                        // Token-wise match for multi-word English queries (e.g. "fed interest rates")
-                        if !crate::translate::contains_cjk(&cl) {
-                            let toks: Vec<&str> = cl
-                                .split(|c: char| !c.is_alphanumeric())
-                                .filter(|w| {
-                                    w.len() >= 2
-                                        && !matches!(
-                                            *w,
-                                            "the" | "will" | "in" | "of" | "to" | "by" | "for" | "on" | "at" | "and" | "or"
-                                        )
-                                })
-                                .collect();
-                            if toks.len() >= 2 && toks.iter().all(|t| hay_en.contains(t)) {
-                                return true;
-                            }
-                        }
-                        false
-                    });
-                    if !matched {
-                        continue;
-                    }
+                if !expanded_queries.is_empty()
+                    && !market_matches_queries(&m, &expanded_queries, translator)
+                {
+                    continue;
                 }
                 if !cat_lower.is_empty() && cat_lower != "all" && m.category != cat_lower {
                     continue;
@@ -262,8 +368,8 @@ impl MarketClient {
             }
         }
 
-        // Also search Gamma /public-search using the best English queries (works for BOTH EN & ZH searches!)
-        if !expanded_queries.is_empty() && out.len() < 12 {
+        // Always query Gamma /public-search when search query is non-empty (works for BOTH EN & ZH searches)
+        if !expanded_queries.is_empty() {
             let gamma_terms: Vec<&str> = expanded_queries
                 .iter()
                 .map(|s| s.as_str())
@@ -273,7 +379,7 @@ impl MarketClient {
 
             for term in gamma_terms {
                 let search_url = format!(
-                    "{}/public-search?q={}",
+                    "{}/public-search?q={}&events_status=active",
                     self.gamma_host,
                     urlencoding_simple(&term.to_lowercase())
                 );
@@ -281,32 +387,15 @@ impl MarketClient {
                     && let Ok(val) = resp.json::<Value>().await
                     && let Some(events) = val.get("events").and_then(|e| e.as_array())
                 {
-                    for ev in events {
-                        let ev_slug = ev.get("slug").and_then(|s| s.as_str()).unwrap_or("").to_string();
-                        let ev_title = ev.get("title").and_then(|s| s.as_str()).unwrap_or("").to_string();
-                        if let Some(markets) = ev.get("markets").and_then(|m| m.as_array()) {
-                            for mv in markets {
-                                if let Some(mut m) = parse_gamma_market(mv) {
-                                    if m.event_slug.is_empty() {
-                                        m.event_slug = ev_slug.clone();
-                                    }
-                                    if m.event_title.is_empty() {
-                                        m.event_title = ev_title.clone();
-                                    }
-                                    if m.accepting_orders
-                                        && !m.token_ids.is_empty()
-                                        && !out.iter().any(|x| x.condition_id == m.condition_id)
-                                    {
-                                        out.push(m);
-                                        if out.len() >= limit {
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
+                    for m in parse_events_array_into_markets(events) {
+                        if !cat_lower.is_empty() && cat_lower != "all" && m.category != cat_lower {
+                            continue;
                         }
-                        if out.len() >= limit {
-                            break;
+                        if !out.iter().any(|x| x.condition_id == m.condition_id) {
+                            out.push(m);
+                            if out.len() >= limit {
+                                break;
+                            }
                         }
                     }
                 }
@@ -314,28 +403,189 @@ impl MarketClient {
                     break;
                 }
             }
+
+            // If query looks like 5m/15m/updown or BTC/ETH/SOL/XRP, surface active 5m/15m rounds at top
+            let raw_lower = raw_q.to_lowercase();
+            if query_wants_short_timeframe(&expanded_queries, &raw_lower)
+                && (cat_lower.is_empty() || cat_lower == "all" || cat_lower == "crypto")
+            {
+                let want_5m = raw_lower.contains("5m") || raw_lower.contains("5min")
+                    || expanded_queries.iter().any(|s| {
+                        let sl = s.to_lowercase();
+                        sl.contains("5m") || sl.contains("5min")
+                    });
+                let want_15m = raw_lower.contains("15m")
+                    || expanded_queries.iter().any(|s| s.to_lowercase().contains("15m"));
+                let (m5_res, m15_res) = match (want_5m, want_15m) {
+                    (true, false) => (self.fetch_short_timeframe_markets("5m", 16).await.unwrap_or_default(), Vec::new()),
+                    (false, true) => (Vec::new(), self.fetch_short_timeframe_markets("15m", 16).await.unwrap_or_default()),
+                    _ => {
+                        let (a, b) = tokio::join!(
+                            self.fetch_short_timeframe_markets("5m", 12),
+                            self.fetch_short_timeframe_markets("15m", 12),
+                        );
+                        (a.unwrap_or_default(), b.unwrap_or_default())
+                    }
+                };
+                let mut front: Vec<MarketSummary> = Vec::new();
+                for cand in m5_res.into_iter().chain(m15_res) {
+                    if !cand.accepting_orders || cand.token_ids.is_empty() {
+                        continue;
+                    }
+                    let coin_filter = detect_crypto_coin(&raw_lower);
+                    let matches_coin = match (coin_filter, extract_short_timeframe_info(&cand)) {
+                        (Some(c), Some(info)) => info.coin == c,
+                        _ => market_matches_queries(&cand, &expanded_queries, translator) || raw_lower.contains("5m") || raw_lower.contains("15m") || raw_lower.contains("updown") || raw_lower.contains("up or down"),
+                    };
+                    if matches_coin && !front.iter().any(|x| x.condition_id == cand.condition_id) {
+                        front.push(cand);
+                    }
+                }
+                if !front.is_empty() {
+                    for existing in out {
+                        if !front.iter().any(|x| x.condition_id == existing.condition_id) {
+                            front.push(existing);
+                        }
+                    }
+                    front.truncate(limit);
+                    out = front;
+                }
+            }
         }
 
         if populate_zh && !out.is_empty() {
-            let mut texts = Vec::with_capacity(out.len() * 3);
-            for m in &out {
-                texts.push(m.question.clone());
-                for o in &m.outcomes {
-                    texts.push(o.clone());
-                }
-            }
-            translator.translate_en_to_zh_batch(&texts).await;
-            for m in &mut out {
-                m.question_zh = translator.get_zh(&m.question);
-                m.outcomes_zh = m
-                    .outcomes
-                    .iter()
-                    .map(|o| translator.get_zh(o).unwrap_or_else(|| o.clone()))
-                    .collect();
-            }
+            populate_market_translations(&mut out, translator).await;
         }
 
         Ok(out)
+    }
+
+    pub async fn fetch_market_by_slug(&self, slug: &str) -> Result<Option<MarketSummary>> {
+        let url = format!("{}/events?slug={}", self.gamma_host, urlencoding_simple(slug));
+        let events: Vec<Value> = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("gamma /events?slug={slug} failed"))?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(parse_events_array_into_markets(&events).into_iter().next())
+    }
+
+    pub async fn fetch_short_timeframe_markets(
+        &self,
+        tag_slug: &str,
+        limit: usize,
+    ) -> Result<Vec<MarketSummary>> {
+        let interval_mins: u32 = if tag_slug.trim().eq_ignore_ascii_case("15m") {
+            15
+        } else {
+            5
+        };
+        let interval_secs = i64::from(interval_mins) * 60;
+        let now_dt = chrono::Utc::now();
+        let now_secs = now_dt.timestamp();
+        let now_iso = now_dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+        let mut out: Vec<MarketSummary> = Vec::new();
+        let tags = if interval_mins == 15 {
+            ["15m", "15M"]
+        } else {
+            ["5m", "5M"]
+        };
+
+        for tag in tags {
+            let url = format!(
+                "{}/events?active=true&closed=false&tag_slug={}&end_date_min={}&order=endDate&ascending=true&limit={}",
+                self.gamma_host,
+                urlencoding_simple(tag),
+                urlencoding_simple(&now_iso),
+                limit.clamp(8, 50)
+            );
+            if let Ok(resp) = self.http.get(&url).send().await
+                && let Ok(events) = resp.json::<Vec<Value>>().await
+            {
+                for m in parse_events_array_into_markets(&events) {
+                    let same_tf = extract_short_timeframe_info(&m)
+                        .is_some_and(|info| info.interval_mins == interval_mins);
+                    if same_tf && !out.iter().any(|x| x.condition_id == m.condition_id) {
+                        out.push(m);
+                    }
+                }
+            }
+            if !out.is_empty() {
+                break;
+            }
+        }
+
+        // Deterministic slug fallback for top 4 crypto Up/Down coins (`btc`, `eth`, `sol`, `xrp`)
+        let fallback_coins = ["btc", "eth", "sol", "xrp"];
+        let missing_coins: Vec<&str> = fallback_coins
+            .into_iter()
+            .filter(|&coin| {
+                !out.iter().any(|m| {
+                    extract_short_timeframe_info(m)
+                        .is_some_and(|i| i.coin == coin && i.interval_mins == interval_mins)
+                })
+            })
+            .collect();
+
+        if !missing_coins.is_empty() {
+            let futs = missing_coins.into_iter().map(|coin| async move {
+                let s1 = deterministic_updown_slug(coin, interval_mins, now_secs);
+                if let Ok(Some(m1)) = self.fetch_market_by_slug(&s1).await {
+                    let expired = m1
+                        .end_date
+                        .as_deref()
+                        .and_then(|e| chrono::DateTime::parse_from_rfc3339(e).ok())
+                        .is_some_and(|dt| dt.timestamp() <= now_secs);
+                    if !expired {
+                        return Some(m1);
+                    }
+                }
+                let s2 = deterministic_updown_slug(coin, interval_mins, now_secs + interval_secs);
+                self.fetch_market_by_slug(&s2).await.ok().flatten()
+            });
+            for maybe_m in futures::future::join_all(futs).await {
+                if let Some(m) = maybe_m
+                    && !out.iter().any(|x| x.condition_id == m.condition_id)
+                {
+                    out.push(m);
+                }
+            }
+        }
+
+        out.sort_by(|a, b| a.end_date.cmp(&b.end_date).then_with(|| a.slug.cmp(&b.slug)));
+        out.truncate(limit);
+        Ok(out)
+    }
+
+    pub async fn fetch_crypto_open_price(
+        &self,
+        symbol: &str,
+        start_iso: &str,
+        end_iso: &str,
+        variant: &str,
+    ) -> Result<f64> {
+        let url = format!(
+            "https://polymarket.com/api/crypto/crypto-price?symbol={}&eventStartTime={}&variant={}&endDate={}",
+            urlencoding_simple(&symbol.trim().to_ascii_uppercase()),
+            urlencoding_simple(start_iso),
+            urlencoding_simple(variant),
+            urlencoding_simple(end_iso),
+        );
+        let body = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .context("crypto-price request failed")?
+            .error_for_status()?
+            .text()
+            .await?;
+        parse_crypto_open_price_json(&body)
     }
 
     pub async fn fetch_event_siblings(&self, event_slug: &str) -> Result<EventSiblings> {
@@ -797,10 +1047,12 @@ fn parse_gamma_market(v: &Value) -> Option<MarketSummary> {
         .unwrap_or("")
         .to_string();
 
-    let (event_slug, event_title) = v
+    let first_ev = v
         .get("events")
         .and_then(|x| x.as_array())
-        .and_then(|a| a.first())
+        .and_then(|a| a.first());
+
+    let (event_slug, event_title) = first_ev
         .map(|ev| {
             (
                 ev.get("slug")
@@ -829,8 +1081,13 @@ fn parse_gamma_market(v: &Value) -> Option<MarketSummary> {
         .unwrap_or(5.0);
     let volume_24hr = v
         .get("volume24hr")
-        .and_then(|x| x.as_f64())
+        .and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|s| s.parse::<f64>().ok())))
         .or_else(|| v.get("volumeNum").and_then(|x| x.as_f64()))
+        .or_else(|| {
+            v.get("volume")
+                .or_else(|| v.get("volumeClob"))
+                .and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|s| s.parse::<f64>().ok())))
+        })
         .unwrap_or(0.0);
     let liquidity = v
         .get("liquidityNum")
@@ -838,6 +1095,18 @@ fn parse_gamma_market(v: &Value) -> Option<MarketSummary> {
         .unwrap_or(0.0);
 
     let category = infer_category(&question, &slug, &event_title);
+
+    let event_start_time = v
+        .get("eventStartTime")
+        .or_else(|| v.get("startDate"))
+        .or_else(|| first_ev.and_then(|ev| ev.get("startTime").or_else(|| ev.get("startDate"))))
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    let end_date = v
+        .get("endDate")
+        .or_else(|| first_ev.and_then(|ev| ev.get("endDate")))
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
 
     Some(MarketSummary {
         id,
@@ -868,10 +1137,8 @@ fn parse_gamma_market(v: &Value) -> Option<MarketSummary> {
             .get("acceptingOrders")
             .and_then(|x| x.as_bool())
             .unwrap_or(true),
-        end_date: v
-            .get("endDate")
-            .and_then(|x| x.as_str())
-            .map(|s| s.to_string()),
+        event_start_time,
+        end_date,
         image: v
             .get("icon")
             .or_else(|| v.get("image"))
@@ -879,6 +1146,123 @@ fn parse_gamma_market(v: &Value) -> Option<MarketSummary> {
             .map(|s| s.to_string()),
         category,
     })
+}
+
+fn parse_events_array_into_markets(events: &[Value]) -> Vec<MarketSummary> {
+    let mut out = Vec::new();
+    for ev in events {
+        let ev_slug = ev.get("slug").and_then(|s| s.as_str()).unwrap_or("").to_string();
+        let ev_title = ev.get("title").and_then(|s| s.as_str()).unwrap_or("").to_string();
+        let ev_start = ev
+            .get("startTime")
+            .or_else(|| ev.get("startDate"))
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
+        let ev_end = ev
+            .get("endDate")
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
+        if let Some(markets) = ev.get("markets").and_then(|m| m.as_array()) {
+            for mv in markets {
+                if let Some(mut m) = parse_gamma_market(mv) {
+                    if m.event_slug.is_empty() {
+                        m.event_slug = ev_slug.clone();
+                    }
+                    if m.event_title.is_empty() {
+                        m.event_title = ev_title.clone();
+                    }
+                    if m.event_start_time.is_none() {
+                        m.event_start_time = ev_start.clone();
+                    }
+                    if m.end_date.is_none() {
+                        m.end_date = ev_end.clone();
+                    }
+                    if m.accepting_orders && !m.token_ids.is_empty() {
+                        out.push(m);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn market_matches_queries(
+    m: &MarketSummary,
+    expanded_queries: &[String],
+    translator: &crate::translate::Translator,
+) -> bool {
+    let hay_en = format!(
+        "{} {} {} {} {}",
+        m.question.to_lowercase(),
+        m.slug.to_lowercase(),
+        m.event_title.to_lowercase(),
+        m.category.to_lowercase(),
+        m.outcomes.join(" ").to_lowercase()
+    );
+    let hay_zh = translator
+        .get_zh(&m.question)
+        .unwrap_or_default()
+        .to_lowercase();
+
+    expanded_queries.iter().any(|cand| {
+        let cl = cand.to_lowercase();
+        if hay_en.contains(&cl) || (!hay_zh.is_empty() && hay_zh.contains(&cl)) {
+            return true;
+        }
+        if !crate::translate::contains_cjk(&cl) {
+            let toks: Vec<&str> = cl
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| {
+                    w.len() >= 2
+                        && !matches!(
+                            *w,
+                            "the" | "will" | "in" | "of" | "to" | "by" | "for" | "on" | "at" | "and" | "or"
+                        )
+                })
+                .collect();
+            if toks.len() >= 2 && toks.iter().all(|t| hay_en.contains(t)) {
+                return true;
+            }
+        }
+        false
+    })
+}
+
+fn query_wants_short_timeframe(expanded_queries: &[String], raw_lower: &str) -> bool {
+    const KEYS: &[&str] = &[
+        "5m", "5min", "15m", "updown", "up or down", "btc", "bitcoin", "eth", "ethereum", "sol",
+        "solana", "xrp",
+    ];
+    if KEYS.iter().any(|k| raw_lower.contains(k)) {
+        return true;
+    }
+    expanded_queries.iter().any(|cand| {
+        let cl = cand.to_lowercase();
+        KEYS.iter().any(|k| cl.contains(k))
+    })
+}
+
+async fn populate_market_translations(
+    out: &mut [MarketSummary],
+    translator: &crate::translate::Translator,
+) {
+    let mut texts = Vec::with_capacity(out.len() * 3);
+    for m in out.iter() {
+        texts.push(m.question.clone());
+        for o in &m.outcomes {
+            texts.push(o.clone());
+        }
+    }
+    translator.translate_en_to_zh_batch(&texts).await;
+    for m in out.iter_mut() {
+        m.question_zh = translator.get_zh(&m.question);
+        m.outcomes_zh = m
+            .outcomes
+            .iter()
+            .map(|o| translator.get_zh(o).unwrap_or_else(|| o.clone()))
+            .collect();
+    }
 }
 
 fn urlencoding_simple(s: &str) -> String {
@@ -896,4 +1280,90 @@ fn urlencoding_simple(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stub_market(slug: &str, question: &str) -> MarketSummary {
+        MarketSummary {
+            id: "1".into(),
+            question: question.into(),
+            question_zh: None,
+            slug: slug.into(),
+            event_slug: slug.into(),
+            event_title: question.into(),
+            condition_id: "0xabc".into(),
+            outcomes: vec!["Up".into(), "Down".into()],
+            outcomes_zh: Vec::new(),
+            token_ids: vec!["t1".into(), "t2".into()],
+            outcome_prices: vec![0.5, 0.5],
+            tick_size: 0.01,
+            min_order_size: 5.0,
+            volume_24hr: 0.0,
+            liquidity: 0.0,
+            best_bid: None,
+            best_ask: None,
+            last_trade_price: None,
+            one_day_change: None,
+            neg_risk: false,
+            fees_enabled: true,
+            accepting_orders: true,
+            event_start_time: None,
+            end_date: None,
+            image: None,
+            category: "crypto".into(),
+        }
+    }
+
+    #[test]
+    fn short_timeframe_slot_slug_and_symbol_extraction_work() {
+        assert_eq!(short_timeframe_slot(1_764_100_123, 300), 1_764_099_900);
+        assert_eq!(short_timeframe_slot(1_764_100_323, 300), 1_764_100_200);
+        assert_eq!(short_timeframe_slot(1_764_100_323, 900), 1_764_099_900);
+        assert_eq!(
+            deterministic_updown_slug("BTC", 5, 1_764_100_123),
+            "btc-updown-5m-1764099900"
+        );
+        assert_eq!(
+            next_updown_slug("btc-updown-5m-1764099900", 1_764_100_123).as_deref(),
+            Some("btc-updown-5m-1764100200")
+        );
+        // Expired old slot advances at least to current active slot
+        assert_eq!(
+            next_updown_slug("eth-updown-15m-1764000000", 1_764_100_323).as_deref(),
+            Some("eth-updown-15m-1764099900")
+        );
+
+        let info5 = extract_short_timeframe_info(&stub_market(
+            "sol-updown-5m-1764099900",
+            "Solana Up or Down - 5 minutes",
+        ))
+        .unwrap();
+        assert_eq!(info5.coin, "sol");
+        assert_eq!(info5.chainlink_symbol, "sol/usd");
+        assert_eq!(info5.binance_symbol, "solusdt");
+        assert_eq!(info5.interval_mins, 5);
+        assert_eq!(info5.variant, "fiveminute");
+        assert_eq!(info5.slot_ts, Some(1_764_099_900));
+
+        let info15 = extract_short_timeframe_info(&stub_market(
+            "xrp-updown-15m-1764099600",
+            "XRP Up or Down - 15m",
+        ))
+        .unwrap();
+        assert_eq!(info15.coin, "xrp");
+        assert_eq!(info15.chainlink_symbol, "xrp/usd");
+        assert_eq!(info15.interval_mins, 15);
+        assert_eq!(info15.variant, "fifteen");
+    }
+
+    #[test]
+    fn crypto_open_price_json_parses_number_or_string_and_rejects_bad_payloads() {
+        assert!((parse_crypto_open_price_json(r#"{"openPrice":91234.56}"#).unwrap() - 91234.56).abs() < 1e-9);
+        assert!((parse_crypto_open_price_json(r#"{"openPrice":"3140.25"}"#).unwrap() - 3140.25).abs() < 1e-9);
+        assert!(parse_crypto_open_price_json(r#"{"openPrice":0}"#).is_err());
+        assert!(parse_crypto_open_price_json(r#"{"other":123}"#).is_err());
+    }
 }

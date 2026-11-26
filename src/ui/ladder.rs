@@ -40,14 +40,18 @@ impl LadderState {
         self.initialized = false;
     }
 
-    pub fn recenter(&mut self, book: Option<&BookView>) {
-        if let Some(mid) = book.and_then(|b| b.mid) {
+    pub fn recenter_mid(&mut self, mid: Option<f64>) {
+        if let Some(mid) = mid {
             self.center_price = clamp_center(mid, self.step);
         }
     }
+
+    pub fn recenter(&mut self, book: Option<&BookView>) {
+        self.recenter_mid(book.and_then(|b| b.mid));
+    }
 }
 
-/// Modern, airy GPU-rendered Desk-style One-Click Price Ladder (DOM).
+/// GPU-rendered Desk-style One-Click Price Ladder (DOM).
 /// Fires instantly on primary pointer press (0ms release delay, 0µs IPC).
 #[allow(clippy::too_many_arguments)]
 pub fn draw_price_ladder(
@@ -56,33 +60,43 @@ pub fn draw_price_ladder(
     pal: ThemePalette,
     state: &mut LadderState,
     odds_fmt: OddsFormat,
+    active_asset_id: Option<&str>,
     book: Option<&BookView>,
     open_orders: &[PaperOrder],
     position: Option<&PaperPosition>,
     rules: &[AutomationRule],
+    interact_enabled: bool,
 ) -> Option<LadderAction> {
     let step = state.step.max(0.001);
     let avail = ui.available_size();
-    let row_h = 26.0_f32;
-    let hdr_h = 26.0_f32;
+    let row_h = 24.0_f32;
+    let hdr_h = 24.0_f32;
     let visible_rows = (((avail.y - hdr_h - 4.0) / row_h).floor() as usize).clamp(9, 41);
     let visible_rows = if visible_rows % 2 == 0 { visible_rows - 1 } else { visible_rows };
     let half = (visible_rows / 2) as isize;
 
     let total_h = hdr_h + (visible_rows as f32) * row_h;
-    let (rect, response) = ui.allocate_exact_size(vec2(avail.x.max(260.0), total_h), Sense::click_and_drag());
+    let sense = if interact_enabled {
+        Sense::click_and_drag()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(avail.x.max(260.0), total_h), sense);
 
-    // Never auto-recenter while the user's cursor is hovering the ladder (prevents rows jumping under your mouse!)
+    // Never auto-recenter while cursor hovers over the ladder
     if let Some(mid) = book.and_then(|b| b.mid) {
         if !state.initialized {
             state.center_price = clamp_center(mid, state.step);
             state.initialized = true;
-        } else if !response.hovered() && state.auto_center && (mid - state.center_price).abs() >= state.step * 6.0 {
+        } else if !(interact_enabled && response.hovered())
+            && state.auto_center
+            && (mid - state.center_price).abs() >= state.step * 6.0
+        {
             state.center_price = clamp_center(mid, state.step);
         }
     }
 
-    if response.hovered() {
+    if interact_enabled && response.hovered() {
         let scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
         if scroll_y.abs() > 2.0 {
             state.auto_center = false;
@@ -92,20 +106,20 @@ pub fn draw_price_ladder(
     }
 
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, CornerRadius::same(10), pal.bg_card);
+    painter.rect_filled(rect, CornerRadius::same(6), pal.bg_card);
     painter.rect_stroke(
         rect,
-        CornerRadius::same(10),
+        CornerRadius::same(6),
         Stroke::new(1.0, pal.border),
         egui::StrokeKind::Inside,
     );
 
-    // Spacious column layout: [MyBid | BidDepth | Price | AskDepth | MyAsk | P&L]
+    // Column layout: [MyBid | BidDepth | Price | AskDepth | MyAsk | P&L]
     let w = rect.width();
     let c_my = 44.0_f32;
-    let c_px = 82.0_f32;
-    let c_pnl = 66.0_f32;
-    let c_depth = ((w - c_my * 2.0 - c_px - c_pnl) * 0.5).max(52.0);
+    let c_px = 80.0_f32;
+    let c_pnl = 64.0_f32;
+    let c_depth = ((w - c_my * 2.0 - c_px - c_pnl) * 0.5).max(48.0);
 
     let x0 = rect.left();
     let x1 = x0 + c_my;
@@ -119,11 +133,15 @@ pub fn draw_price_ladder(
     let hdr_rect = Rect::from_min_max(pos2(x0 + 1.0, rect.top() + 1.0), pos2(x6 - 1.0, rect.top() + hdr_h));
     painter.rect_filled(
         hdr_rect,
-        CornerRadius { nw: 9, ne: 9, sw: 0, se: 0 },
+        CornerRadius { nw: 5, ne: 5, sw: 0, se: 0 },
         pal.ladder_hdr_bg,
     );
+    painter.line_segment(
+        [pos2(x0 + 1.0, rect.top() + hdr_h), pos2(x6 - 1.0, rect.top() + hdr_h)],
+        Stroke::new(1.0, pal.border),
+    );
     let hdr_col = pal.text_muted;
-    let hdr_font = FontId::proportional(11.0);
+    let hdr_font = FontId::proportional(10.5);
     let hdr_y = hdr_rect.center().y;
     painter.text(pos2((x0 + x1) * 0.5, hdr_y), Align2::CENTER_CENTER, tr(lang, "MyB", "买挂"), hdr_font.clone(), hdr_col);
     painter.text(pos2((x1 + x2) * 0.5, hdr_y), Align2::CENTER_CENTER, tr(lang, "Bid Size", "买盘深度"), hdr_font.clone(), hdr_col);
@@ -149,6 +167,9 @@ pub fn draw_price_ladder(
     let mut my_bids: HashMap<isize, f64> = HashMap::new();
     let mut my_asks: HashMap<isize, f64> = HashMap::new();
     for o in open_orders {
+        if active_asset_id != Some(o.asset_id.as_str()) {
+            continue;
+        }
         let k = (o.price / step).round() as isize;
         if o.side == "BUY" {
             *my_bids.entry(k).or_insert(0.0) += o.remaining_size;
@@ -159,13 +180,15 @@ pub fn draw_price_ladder(
 
     let mut rule_tags: HashMap<isize, (&'static str, Color32)> = HashMap::new();
     for r in rules {
-        if !r.active { continue; }
+        if !r.active || active_asset_id != Some(r.asset_id.as_str()) {
+            continue;
+        }
         let k = (r.trigger_price / step).round() as isize;
         let pair = match r.kind {
-            RuleKind::StopLoss => ("SL", Color32::from_rgb(244, 63, 94)),
-            RuleKind::TakeProfit => ("TP", Color32::from_rgb(16, 185, 129)),
-            RuleKind::TrailingStop => ("TRL", Color32::from_rgb(245, 158, 11)),
-            RuleKind::DripFeed => ("DRP", Color32::from_rgb(56, 189, 248)),
+            RuleKind::StopLoss => ("SL", pal.red),
+            RuleKind::TakeProfit => ("TP", pal.green),
+            RuleKind::TrailingStop => ("TRL", pal.amber),
+            RuleKind::DripFeed => ("DRP", pal.blue),
         };
         rule_tags.insert(k, pair);
     }
@@ -186,19 +209,23 @@ pub fn draw_price_ladder(
     let (hover_pos, primary_pressed, shift_held) = ui.input(|i| {
         (i.pointer.hover_pos(), i.pointer.primary_pressed(), i.modifiers.shift)
     });
+    let allow_pointer = interact_enabled && response.hovered();
 
     let mut action: Option<LadderAction> = None;
-    let mono = FontId::monospace(11.5);
+    let mono = FontId::monospace(11.0);
     let mono_sm = FontId::monospace(10.0);
     let row_sep = Stroke::new(0.5, pal.grid_line);
     let px_bg = pal.px_col_bg;
-    let bid_bar = Color32::from_rgba_unmultiplied(16, 185, 129, if pal.light { 38 } else { 54 });
-    let ask_bar = Color32::from_rgba_unmultiplied(244, 63, 94, if pal.light { 34 } else { 54 });
+    let bid_bar = ThemePalette::tint(pal.green, if pal.light { 34 } else { 44 });
+    let ask_bar = ThemePalette::tint(pal.red, if pal.light { 30 } else { 44 });
+    let best_bid_row = ThemePalette::tint(pal.green, 16);
+    let best_ask_row = ThemePalette::tint(pal.red, 16);
+    let my_order_fill = ThemePalette::tint(pal.amber, if pal.light { 34 } else { 42 });
 
     for i in 0..visible_rows {
         let k = center_k + (half - i as isize);
         let p = ((k as f64) * step * 10_000.0).round() / 10_000.0;
-        let valid = p >= 0.001 && p <= 0.999;
+        let valid = (0.001..=0.999).contains(&p);
 
         let y_top = rect.top() + hdr_h + (i as f32) * row_h;
         let y_bot = y_top + row_h;
@@ -209,9 +236,9 @@ pub fn draw_price_ladder(
         if !valid { continue; }
 
         if best_bid_k == Some(k) {
-            painter.rect_filled(row_rect, 0.0, Color32::from_rgba_unmultiplied(16, 185, 129, 20));
+            painter.rect_filled(row_rect, 0.0, best_bid_row);
         } else if best_ask_k == Some(k) {
-            painter.rect_filled(row_rect, 0.0, Color32::from_rgba_unmultiplied(244, 63, 94, 20));
+            painter.rect_filled(row_rect, 0.0, best_ask_row);
         }
 
         let r_my_bid = Rect::from_min_max(pos2(x0, y_top), pos2(x1, y_bot));
@@ -221,24 +248,24 @@ pub fn draw_price_ladder(
         let r_my_ask = Rect::from_min_max(pos2(x4, y_top), pos2(x5, y_bot));
         let r_pnl = Rect::from_min_max(pos2(x5, y_top), pos2(x6, y_bot));
 
-        if let Some(hp) = hover_pos {
+        if allow_pointer && let Some(hp) = hover_pos {
             if r_bid.contains(hp) {
-                painter.rect_filled(r_bid.shrink(1.0), 4.0, Color32::from_rgba_unmultiplied(16, 185, 129, 64));
+                painter.rect_filled(r_bid.shrink(1.0), 3.0, ThemePalette::tint(pal.green, 56));
                 if primary_pressed {
                     action = Some(LadderAction::PlaceOrder { side: "BUY", price: p, post_only_override: shift_held });
                 }
             } else if r_ask.contains(hp) {
-                painter.rect_filled(r_ask.shrink(1.0), 4.0, Color32::from_rgba_unmultiplied(244, 63, 94, 64));
+                painter.rect_filled(r_ask.shrink(1.0), 3.0, ThemePalette::tint(pal.red, 56));
                 if primary_pressed {
                     action = Some(LadderAction::PlaceOrder { side: "SELL", price: p, post_only_override: shift_held });
                 }
             } else if r_my_bid.contains(hp) && my_bids.contains_key(&k) {
-                painter.rect_filled(r_my_bid.shrink(2.0), 4.0, Color32::from_rgba_unmultiplied(245, 158, 11, 100));
+                painter.rect_filled(r_my_bid.shrink(2.0), 3.0, ThemePalette::tint(pal.amber, 86));
                 if primary_pressed {
                     action = Some(LadderAction::CancelLevel { side: "BUY", price: p });
                 }
             } else if r_my_ask.contains(hp) && my_asks.contains_key(&k) {
-                painter.rect_filled(r_my_ask.shrink(2.0), 4.0, Color32::from_rgba_unmultiplied(245, 158, 11, 100));
+                painter.rect_filled(r_my_ask.shrink(2.0), 3.0, ThemePalette::tint(pal.amber, 86));
                 if primary_pressed {
                     action = Some(LadderAction::CancelLevel { side: "SELL", price: p });
                 }
@@ -249,47 +276,62 @@ pub fn draw_price_ladder(
             let bw = ((bsz / max_depth).min(1.0) as f32) * (r_bid.width() - 4.0);
             painter.rect_filled(
                 Rect::from_min_max(pos2(r_bid.right() - bw - 2.0, y_top + 3.0), pos2(r_bid.right() - 2.0, y_bot - 3.0)),
-                3.0,
+                2.0,
                 bid_bar,
             );
-            painter.text(pos2(r_bid.right() - 7.0, y_mid), Align2::RIGHT_CENTER, format_size(bsz), mono.clone(), pal.green_text);
+            painter.text(pos2(r_bid.right() - 6.0, y_mid), Align2::RIGHT_CENTER, format_size(bsz), mono.clone(), pal.green_text);
         }
 
         if let Some(&asz) = ask_map.get(&k) && asz > 0.0 {
             let aw = ((asz / max_depth).min(1.0) as f32) * (r_ask.width() - 4.0);
             painter.rect_filled(
                 Rect::from_min_max(pos2(r_ask.left() + 2.0, y_top + 3.0), pos2(r_ask.left() + aw + 2.0, y_bot - 3.0)),
-                3.0,
+                2.0,
                 ask_bar,
             );
-            painter.text(pos2(r_ask.left() + 7.0, y_mid), Align2::LEFT_CENTER, format_size(asz), mono.clone(), pal.red_text);
+            painter.text(pos2(r_ask.left() + 6.0, y_mid), Align2::LEFT_CENTER, format_size(asz), mono.clone(), pal.red_text);
         }
 
-        let px_fill = if avg_k == Some(k) { Color32::from_rgba_unmultiplied(56, 189, 248, 52) } else { px_bg };
+        let px_fill = if avg_k == Some(k) {
+            ThemePalette::tint(pal.blue, if pal.light { 34 } else { 44 })
+        } else {
+            px_bg
+        };
         painter.rect_filled(r_px, 0.0, px_fill);
         if last_k == Some(k) {
-            painter.rect_stroke(r_px.shrink(1.0), 3.0, Stroke::new(1.3, pal.blue), egui::StrokeKind::Inside);
+            painter.rect_stroke(
+                r_px.shrink(1.0),
+                CornerRadius::same(2),
+                Stroke::new(1.2, pal.blue),
+                egui::StrokeKind::Inside,
+            );
         }
         painter.text(r_px.center(), Align2::CENTER_CENTER, format_odds(Some(p), odds_fmt, step), mono.clone(), pal.text_primary);
 
         if let Some(&(tag, tcol)) = rule_tags.get(&k) {
             let b = Rect::from_min_max(pos2(r_px.right() - 25.0, y_top + 4.0), pos2(r_px.right() - 2.0, y_bot - 4.0));
-            painter.rect_filled(b, 3.0, tcol);
-            painter.text(b.center(), Align2::CENTER_CENTER, tag, FontId::monospace(8.5), Color32::from_rgb(10, 13, 20));
+            painter.rect_filled(b, CornerRadius::same(2), tcol);
+            painter.text(
+                b.center(),
+                Align2::CENTER_CENTER,
+                tag,
+                FontId::monospace(8.5),
+                ThemePalette::contrast_on(tcol),
+            );
         }
 
         if let Some(&mb) = my_bids.get(&k) && mb > 0.0 {
-            painter.rect_filled(r_my_bid.shrink(2.5), 4.0, Color32::from_rgba_unmultiplied(245, 158, 11, 52));
-            painter.text(r_my_bid.center(), Align2::CENTER_CENTER, format!("×{}", format_size(mb)), mono_sm.clone(), Color32::from_rgb(251, 191, 36));
+            painter.rect_filled(r_my_bid.shrink(2.0), 3.0, my_order_fill);
+            painter.text(r_my_bid.center(), Align2::CENTER_CENTER, format!("×{}", format_size(mb)), mono_sm.clone(), pal.amber);
         }
         if let Some(&ma) = my_asks.get(&k) && ma > 0.0 {
-            painter.rect_filled(r_my_ask.shrink(2.5), 4.0, Color32::from_rgba_unmultiplied(245, 158, 11, 52));
-            painter.text(r_my_ask.center(), Align2::CENTER_CENTER, format!("×{}", format_size(ma)), mono_sm.clone(), Color32::from_rgb(251, 191, 36));
+            painter.rect_filled(r_my_ask.shrink(2.0), 3.0, my_order_fill);
+            painter.text(r_my_ask.center(), Align2::CENTER_CENTER, format!("×{}", format_size(ma)), mono_sm.clone(), pal.amber);
         }
 
         if let Some(pos) = position && pos.shares > 0.01 {
             let pnl = pos.shares * (p - pos.avg_entry);
-            let pcol = if pnl >= 0.0 { Color32::from_rgb(16, 185, 129) } else { Color32::from_rgb(244, 63, 94) };
+            let pcol = if pnl >= 0.0 { pal.green } else { pal.red };
             painter.text(pos2(r_pnl.right() - 6.0, y_mid), Align2::RIGHT_CENTER, format_usd(pnl, true), mono_sm.clone(), pcol);
         }
     }
@@ -300,4 +342,66 @@ pub fn draw_price_ladder(
 fn clamp_center(p: f64, step: f64) -> f64 {
     let k = (p / step).round();
     ((k * step).clamp(step * 5.0, 1.0 - step * 5.0) * 10_000.0).round() / 10_000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn price_ladder_blocks_clicks_when_interact_disabled() {
+        let pal = ThemePalette::dark();
+        let click_pos = pos2(80.0, 140.0);
+
+        let run_click_case = |interact_enabled: bool| -> Option<LadderAction> {
+            let ctx = egui::Context::default();
+            let mut state = LadderState::default();
+            let make_raw = |events: Vec<egui::Event>| egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 400.0))),
+                events,
+                ..Default::default()
+            };
+            let mut step = |events: Vec<egui::Event>| -> Option<LadderAction> {
+                let mut captured = None;
+                let mut out = ctx.run_ui(make_raw(events), |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        captured = draw_price_ladder(
+                            ui,
+                            Lang::En,
+                            pal,
+                            &mut state,
+                            OddsFormat::Cents,
+                            Some("tok1"),
+                            None,
+                            &[],
+                            None,
+                            &[],
+                            interact_enabled,
+                        );
+                    });
+                });
+                out.textures_delta.clear();
+                captured
+            };
+
+            // Warm-up frame so egui records widget rect and hover state.
+            let _ = step(vec![egui::Event::PointerMoved(click_pos)]);
+            // Click frame while pointer hovers the Bid cell.
+            step(vec![
+                egui::Event::PointerMoved(click_pos),
+                egui::Event::PointerButton {
+                    pos: click_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ])
+        };
+
+        assert!(matches!(
+            run_click_case(true),
+            Some(LadderAction::PlaceOrder { side: "BUY", .. })
+        ));
+        assert!(run_click_case(false).is_none());
+    }
 }

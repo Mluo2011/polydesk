@@ -28,19 +28,19 @@ fn main() -> eframe::Result {
 
     let core = {
         let _guard = rt.enter();
-        CoreEngine::start(None).expect("failed starting PolyDesk core engine")
+        CoreEngine::start(None).expect("failed starting PolyDirect core engine")
     };
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("PolyDesk — Low-Latency Polymarket CLOB V2 Terminal")
+            .with_title("PolyDirect — Low-Latency Polymarket CLOB V2 Terminal")
             .with_inner_size([1480.0, 900.0])
             .with_min_inner_size([1024.0, 680.0]),
         ..Default::default()
     };
 
     eframe::run_native(
-        "PolyDesk",
+        "PolyDirect",
         options,
         Box::new(move |cc| Ok(Box::new(ui::PolyDeskDesktop::new(cc, core, rt)))),
     )

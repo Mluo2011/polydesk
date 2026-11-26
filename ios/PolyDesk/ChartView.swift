@@ -44,7 +44,7 @@ struct ChartView: View {
 
             Canvas { ctx, size in
                 let bg = Path(CGRect(origin: .zero, size: size))
-                let bgCol = scheme == .light ? Color.white : Color(red: 0.067, green: 0.086, blue: 0.133)
+                let bgCol = scheme == .light ? Color.white : Color(red: 24.0 / 255.0, green: 26.0 / 255.0, blue: 31.0 / 255.0)
                 ctx.fill(bg, with: .color(bgCol))
 
                 let pts = engine.history

@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PolyDirect 中文使用与充值指南 (v0.3.0)</title>
+<style>
+  :root {
+    --bg: #f1f5f9;
+    --card: #ffffff;
+    --border: #e2e8f0;
+    --text: #0f172a;
+    --sub: #475569;
+    --muted: #64748b;
+    --blue: #2563eb;
+    --green: #059669;
+    --amber: #d97706;
+    --red: #e11d48;
+    --code-bg: #f8fafc;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #090c12;
+      --card: #111622;
+      --border: #1e293b;
+      --text: #f8fafc;
+      --sub: #cbd5e1;
+      --muted: #94a3b8;
+      --blue: #3b82f6;
+      --green: #00d395;
+      --amber: #fbbf24;
+      --red: #ff4d6a;
+      --code-bg: #0d121d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 28px 18px 64px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", system-ui, -apple-system, sans-serif;
+    line-height: 1.72;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 28px; margin: 0 0 8px; }
+  .sub { color: var(--muted); font-size: 14px; margin-bottom: 22px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 20px 24px;
+    margin-bottom: 16px;
+  }
+  h2 {
+    margin: 0 0 12px;
+    font-size: 18px;
+    color: var(--blue);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 8px;
+  }
+  h3 { margin: 14px 0 6px; font-size: 15px; }
+  p, li { font-size: 14.5px; color: var(--sub); }
+  strong { color: var(--text); }
+  ol, ul { padding-left: 20px; margin: 8px 0; }
+  li { margin-bottom: 6px; }
+  code {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1px 6px;
+    font-family: Consolas, "Cascadia Mono", monospace;
+    font-size: 13px;
+    color: var(--blue);
+  }
+  .banner {
+    border-radius: 10px;
+    padding: 12px 15px;
+    margin: 12px 0;
+    font-size: 13.5px;
+  }
+  .banner-green {
+    background: rgba(5, 150, 105, 0.10);
+    border: 1px solid rgba(5, 150, 105, 0.35);
+    color: var(--text);
+  }
+  .banner-amber {
+    background: rgba(217, 119, 6, 0.10);
+    border: 1px solid rgba(217, 119, 6, 0.35);
+    color: var(--text);
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 8px;
+    font-size: 13.5px;
+  }
+  th, td {
+    text-align: left;
+    padding: 9px 10px;
+    border-bottom: 1px solid var(--border);
+    color: var(--sub);
+  }
+  th { color: var(--muted); font-weight: 600; }
+  .k { color: var(--blue); font-family: Consolas, monospace; font-weight: 700; }
+  .tag {
+    display: inline-block;
+    padding: 2px 9px;
+    border-radius: 99px;
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .tag-g { background: rgba(5, 150, 105, 0.16); color: var(--green); }
+  .tag-y { background: rgba(217, 119, 6, 0.16); color: var(--amber); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>PolyDirect 中文使用与充值指南</h1>
+  <div class="sub">纯本地原生 GPU 极速 Polymarket CLOB V2 交易终端 · 支持 Windows / macOS / Linux / iPad · 私钥永不离开本机</div>
+
+  <div class="banner banner-green">
+    <strong>安全保障（100% 本地非托管）：</strong>PolyDirect 完全在你的电脑本地运行，没有任何托管服务器。随机生成的助记词和私钥全部调用操作系统加密随机数生成器（CSPRNG）在本机生成，并以 <code>Argon2id + AES-256-GCM</code> 加密保存在你自己的设备中，绝不上传网络；所有订单均在本地完成 EIP-712 签名后直连 Polymarket。
+  </div>
+
+  <div class="card">
+    <h2>1. 安装与首次打开（Windows 10 / 11）</h2>
+    <ol>
+      <li>下载并双击运行安装程序 <strong><code>PolyDirect-Setup.exe</code></strong>（无需管理员权限，会自动安装到开始菜单和桌面快捷方式）。</li>
+      <li>首次运行未签名软件时，如果 Windows 弹出蓝色提示<strong>「Windows 已保护你的电脑」</strong>：点击<strong>「更多信息」→「仍要运行」</strong>即可完成安装。</li>
+      <li>打开软件后：
+        <ul>
+          <li>点击右上角 <strong><code>中文</code></strong> 按钮（或按键盘 <code>L</code> 键），全界面及所有市场标题会自动切换为简体中文。</li>
+          <li>点击右上角 <strong><code>浅色</code> / <code>深色</code></strong> 按钮，可随时自由切换<strong>浅色模式 / 深色模式</strong>并自动记住偏好。</li>
+        </ul>
+      </li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <h2>2. 浏览与搜索全站市场</h2>
+    <ul>
+      <li><strong>直接点击任意市场卡片即可打开：</strong>点击左侧市场卡片的任意位置（标题、价格或空白区域）即可切换市场；点击左上角 <code>★</code> 可加入自选收藏。</li>
+      <li><strong>支持中英文搜索全站市场：</strong>搜索框可直接输入中文（如 <code>比特币</code>、<code>美联储</code>、<code>特朗普</code>、<code>NBA</code>）或英文关键词；列表底部点击<strong>「加载更多市场 (+100)」</strong>可继续翻页加载 Polymarket 全站活跃市场。</li>
+      <li><strong>顶部实时资产栏：</strong>顶部直接展示当前 <strong>总资产（Portfolio）</strong>、<strong>可用余额（Cash）</strong> 与 <strong>浮动盈亏（P&amp;L）</strong>。</li>
+      <li><strong>先练手再实盘：</strong>软件默认处于 <span class="tag tag-y">模拟盘</span>（内置 <strong>$1,000 模拟金</strong>，对接真实实时盘口），零风险熟悉后再切实盘。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>3. 新建随机本地钱包 或 导入已有私钥</h2>
+    <p>点击右上角蓝色 <strong><code>+ 充值 / 钱包</code></strong> 按钮，有两种方式开启 <span class="tag tag-g">实盘</span>：</p>
+
+    <h3>方式 A（推荐，最省事）：一键生成随机本地钱包</h3>
+    <ol>
+      <li>选择 <strong>「一键生成随机本地钱包」</strong>，设置一个 ≥12 位的本机加密密码（旧版本已创建的 ≥6 位密码加密库仍可正常解锁），点击 <strong><code>生成随机本地钱包</code></strong>。</li>
+      <li>软件会在你电脑本地随机生成一个全新的 <strong>Polygon 钱包地址</strong>、<strong>12 词助记词（BIP-39）</strong> 和 <strong>私钥（0x...）</strong>，并自动为你生成专属的 <strong>USDT / USDC 直充地址</strong>。</li>
+      <li><strong>请立刻用纸抄写保存这 12 个助记词和私钥</strong>（不要发给任何人，也不要截图上传云盘）。以后随时可在 MetaMask / Rabby 中用这 12 个词恢复钱包或提现。</li>
+      <li>如果日后想再次查看备份，在钱包窗口输入你的加密密码点击<strong>「查看助记词/私钥」</strong>即可。</li>
+    </ol>
+
+    <h3>方式 B：导入已有私钥或 12 词助记词</h3>
+    <ul>
+      <li><strong>Polymarket 官网（邮箱 / Google 登录）：</strong>钱包类型选 <code>Polymarket Proxy Wallet</code>，填入 66 位私钥（官网 Settings → Account → Export Private Key）及官网的 42 位充值/代理地址。</li>
+      <li><strong>Polymarket 官网（MetaMask / Rabby 登录）：</strong>钱包类型选 <code>Polymarket Gnosis Safe</code>，填入私钥或 12 词助记词及官网代理地址。</li>
+      <li><strong>独立冷/热钱包（EOA）：</strong>钱包类型选 <code>EOA</code>，填入私钥或 12 词助记词，代理地址留空即可。</li>
+    </ul>
+
+    <div class="banner banner-amber">
+      <strong>安全提醒：</strong>请只用专门的小额交易钱包，不要导入存放大额长期资产的主钱包。Polymarket 实盘要求年满 18 周岁且遵守当地法规。
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>4. 如何直接转入 USDT / USDC 充值 &amp; 如何提现</h2>
+    <h3>直接转入 USDT / USDC 充值（官方跨链桥自动 1:1 转换）</h3>
+    <ol>
+      <li>在 <strong><code>+ 充值 / 钱包</code></strong> 窗口下滑到 <strong>「直接转入 USDT / USDC 充值 (Polymarket 官方跨链桥)」</strong>（新建钱包会自动加载；导入钱包后点 <strong><code>获取 USDT/USDC 充值地址</code></strong>）。</li>
+      <li>从币安（Binance）、欧易（OKX）、Bybit、Coinbase、MetaMask 或 Phantom 直接提币 <strong>USDT 或 USDC</strong> 到你的专属充值地址：
+        <ul>
+          <li><strong>EVM 地址（0x...）：</strong>支持 Polygon / BNB Chain (BSC) / Base / Arbitrum / Optimism / 以太坊的 <strong>USDT / USDC</strong>（最低 $2–$3）</li>
+          <li><strong>波场 Tron TRC-20 地址（T...）：</strong>支持 <strong>TRC-20 USDT</strong>（最低 $2）</li>
+          <li><strong>Solana 地址：</strong>支持 <strong>USDT / USDC / SOL</strong>（最低 $2）</li>
+          <li><strong>Bitcoin 地址：</strong>支持 <strong>BTC</strong>（最低约 $3.6）</li>
+        </ul>
+      </li>
+      <li>建议首次先用 <strong>$5–$10 小额测试</strong>。等待约 10–60 秒，官方跨链桥会自动 1:1 换成 Polygon <code>pUSD</code> 到账你的钱包，随后点击 <strong><code>刷新余额与授权</code></strong> 即可看到余额并直接下单！</li>
+    </ol>
+
+    <h3>如何提现</h3>
+    <ul>
+      <li>你的钱始终在你自己的链上钱包里，不由软件托管。</li>
+      <li><strong>本地生成的新钱包 / EOA：</strong>随时把 12 词助记词或私钥导入 MetaMask / Rabby，直接把 Polygon 上的 USDC/pUSD 提币回交易所即可。</li>
+      <li><strong>官网 Proxy / Safe 钱包：</strong>直接登录 <code>polymarket.com/portfolio</code> 点击 <strong>Withdraw</strong> 提现。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>5. 下单教程 &amp; 什么是「1 份」？</h2>
+    <h3>什么是「1 份」（1 share）？</h3>
+    <p>Polymarket 上买卖的单位是<strong>份（shares）</strong>：<strong>每 1 份在结果猜对时固定兑付 $1.00，猜错则归 $0.00。</strong></p>
+    <ul>
+      <li>举例：如果「是」当前价格是 <code>40¢</code>（$0.40），你买入 <strong>$20</strong>，就会得到 <strong>50 份</strong>；如果最终结果是「是」，这 50 份结算拿到 <strong>$50.00</strong>（净赚 <strong>$30.00</strong>）。</li>
+      <li>你也可以随时在结果出来前提前卖出（比如涨到 <code>65¢</code> 时卖出这 50 份，直接落袋 $32.50）。</li>
+    </ul>
+
+    <h3>右侧三种下单模式</h3>
+    <ul>
+      <li><strong>快捷买卖（默认，和 Polymarket 官网一样简单）：</strong>选择 <strong>买入 / 卖出</strong> → 选 <strong>是 / 否</strong> → 输入金额（或点 <code>+$1 / +$10 / +$50 / +$100</code>）→ 一键点击大按钮 <strong>「立即买入 / 立即卖出」</strong> 即可成交，支持市价和限价。</li>
+      <li><strong>专业盘口（Ladder）：</strong>直接点绿色买盘格挂买单、点红色卖盘格挂卖单；按住 <code>Shift + 点击</code> 强制只做 Maker 挂单；点击橙色 <code>×数字</code> 一键撤单；支持 <code>GTC / Post / FAK / FOK / tFOK / Sweep</code>。</li>
+      <li><strong>条件单（Pro）：</strong>支持本地微秒触发的 <strong>止损（SL）</strong>、<strong>止盈（TP）</strong>、<strong>移动止损（Trailing）</strong>、<strong>分批阶梯挂单</strong>、以及 <strong>一键锁盈（Green-Up / 抽本留利润）</strong>。</li>
+    </ul>
+
+    <table>
+      <thead>
+        <tr><th>快捷键</th><th>功能说明</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="k">B / S</td><td>以买一价挂买单 / 以卖一价挂卖单</td></tr>
+        <tr><td class="k">Shift + B / Shift + S</td><td>市价吃卖一买入 / 市价砸买一卖出（FAK）</td></tr>
+        <tr><td class="k">X / Shift + X</td><td>撤销当前市场挂单 / 紧急一键全撤</td></tr>
+        <tr><td class="k">G / F</td><td>一键锁盈（Green-Up） / 立即市价平仓</td></tr>
+        <tr><td class="k">Space</td><td>盘口居中到最新价</td></tr>
+        <tr><td class="k">O / L</td><td>切换赔率格式（¢ / % / 小数 / 美式） / 切换中英文</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>6. 自动更新与多设备同步</h2>
+    <ul>
+      <li><strong>软件内一键自动更新：</strong>有新版本发布时，软件顶部会出现绿色更新提示按钮，或在 <strong>「设置」</strong> 中点击<strong>「检查更新」→「立即下载并更新」</strong>。更新前会强制校验 <code>SHA-256</code> 哈希，验证通过后自动替换并重启，无需重新下载安装包。</li>
+      <li><strong>多设备同步：</strong>在多台电脑或 iPad 上导入同一个钱包即可共用同一账户；实盘模式下软件每 4 秒自动同步全账户所有挂单、持仓和余额（多设备同时使用时，请保持「断线防失控心跳」处于关闭状态）。</li>
+    </ul>
+  </div>
+</div>
+</body>
+</html>

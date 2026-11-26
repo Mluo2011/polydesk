@@ -15,35 +15,36 @@ mkdir -p \
   "$HOME/.local/share/icons/hicolor/256x256/apps" \
   "$HOME/.local/share/icons/hicolor/scalable/apps"
 
-install -m 755 "$BIN" "$HOME/.local/bin/polydesk"
+install -m 755 "$BIN" "$HOME/.local/bin/polydirect"
 
 if [[ -f "$ROOT/assets/polydesk.png" ]]; then
-  install -m 644 "$ROOT/assets/polydesk.png" "$HOME/.local/share/icons/hicolor/256x256/apps/polydesk.png"
+  install -m 644 "$ROOT/assets/polydesk.png" "$HOME/.local/share/icons/hicolor/256x256/apps/polydirect.png"
 fi
 if [[ -f "$ROOT/assets/polydesk.svg" ]]; then
-  install -m 644 "$ROOT/assets/polydesk.svg" "$HOME/.local/share/icons/hicolor/scalable/apps/polydesk.svg"
+  install -m 644 "$ROOT/assets/polydesk.svg" "$HOME/.local/share/icons/hicolor/scalable/apps/polydirect.svg"
 fi
 
-cat > "$HOME/.local/share/applications/polydesk.desktop" <<EOF
+rm -f "$HOME/.local/share/applications/polydesk.desktop"
+cat > "$HOME/.local/share/applications/polydirect.desktop" <<EOF
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=PolyDesk
-Name[zh_CN]=PolyDesk 交易终端
+Name=PolyDirect
+Name[zh_CN]=PolyDirect 交易终端
 GenericName=Polymarket Trading Terminal
 GenericName[zh_CN]=Polymarket 极速交易终端
 Comment=Native Low-Latency Polymarket CLOB V2 Trading Terminal
 Comment[zh_CN]=纯本地低延迟 Polymarket CLOB V2 交易终端
-Exec=$HOME/.local/bin/polydesk
-Icon=polydesk
+Exec=$HOME/.local/bin/polydirect
+Icon=polydirect
 Terminal=false
 Categories=Finance;Network;
 Keywords=Polymarket;Trading;Terminal;Crypto;CLOB;
 StartupNotify=true
-StartupWMClass=PolyDesk
+StartupWMClass=PolyDirect
 EOF
 
-chmod 644 "$HOME/.local/share/applications/polydesk.desktop"
+chmod 644 "$HOME/.local/share/applications/polydirect.desktop"
 
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database "$HOME/.local/share/applications" || true
@@ -52,6 +53,6 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
   gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" >/dev/null 2>&1 || true
 fi
 
-echo "Installed PolyDesk as a desktop app in your Applications Menu!"
-echo "  Binary : $HOME/.local/bin/polydesk"
-echo "  Menu   : $HOME/.local/share/applications/polydesk.desktop"
+echo "Installed PolyDirect as a desktop app in your Applications Menu!"
+echo "  Binary : $HOME/.local/bin/polydirect"
+echo "  Menu   : $HOME/.local/share/applications/polydirect.desktop"

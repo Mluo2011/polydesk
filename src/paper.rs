@@ -306,14 +306,13 @@ impl PaperEngine {
             order.remaining_size = 0.0;
             order.status = "FILLED".into();
         } else if order_type == "FAK" || order_type == "FOK" {
-            order.remaining_size = 0.0;
-            order.status = if order.filled_size > 0.0 {
-                "FILLED".into()
+            if order.filled_size > 1e-6 {
+                order.status = "PARTIAL".into();
             } else {
-                "CANCELLED".into()
-            };
+                order.status = "CANCELLED".into();
+            }
         } else {
-            order.status = if order.filled_size > 0.0 {
+            order.status = if order.filled_size > 1e-6 {
                 "PARTIAL".into()
             } else {
                 "OPEN".into()
@@ -445,6 +444,121 @@ impl PaperEngine {
             }
         }
         count
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn split_position(
+        &self,
+        condition_id: &str,
+        market_question: &str,
+        yes_asset_id: &str,
+        no_asset_id: &str,
+        yes_outcome: &str,
+        no_outcome: &str,
+        amount_usd: f64,
+    ) -> Result<()> {
+        if !amount_usd.is_finite() || amount_usd <= 1e-6 {
+            return Err(anyhow!("CTF Split amount must be a positive number"));
+        }
+        if yes_asset_id.trim().is_empty()
+            || no_asset_id.trim().is_empty()
+            || yes_asset_id == no_asset_id
+        {
+            return Err(anyhow!(
+                "CTF Split requires two distinct binary outcome token IDs"
+            ));
+        }
+
+        let mut s = self.inner.lock();
+        let reserved: f64 = s
+            .orders
+            .values()
+            .filter(|o| (o.status == "OPEN" || o.status == "PARTIAL") && o.side == "BUY")
+            .map(|o| o.remaining_size * o.price)
+            .sum();
+        let free_cash = s.cash_usd - reserved;
+        if amount_usd > free_cash + 1e-6 {
+            return Err(anyhow!(
+                "Insufficient available paper balance for CTF Split: need ${amount_usd:.2}, available ${:.2}",
+                free_cash.max(0.0)
+            ));
+        }
+
+        s.cash_usd -= amount_usd;
+        for (aid, outcome) in [(yes_asset_id, yes_outcome), (no_asset_id, no_outcome)] {
+            let pos = s
+                .positions
+                .entry(aid.to_string())
+                .or_insert_with(|| PaperPosition {
+                    asset_id: aid.to_string(),
+                    condition_id: condition_id.to_string(),
+                    market_question: market_question.to_string(),
+                    outcome: outcome.to_string(),
+                    shares: 0.0,
+                    avg_entry: 0.0,
+                    realized_pnl: 0.0,
+                });
+            let new_shares = pos.shares + amount_usd;
+            pos.avg_entry = (pos.shares * pos.avg_entry + amount_usd * 0.5) / new_shares.max(1e-9);
+            pos.shares = new_shares;
+        }
+        Ok(())
+    }
+
+    pub fn merge_positions(
+        &self,
+        yes_asset_id: &str,
+        no_asset_id: &str,
+        pairs: f64,
+    ) -> Result<()> {
+        if !pairs.is_finite() || pairs <= 1e-6 {
+            return Err(anyhow!("CTF Merge pair amount must be positive"));
+        }
+        if yes_asset_id.trim().is_empty()
+            || no_asset_id.trim().is_empty()
+            || yes_asset_id == no_asset_id
+        {
+            return Err(anyhow!(
+                "CTF Merge requires two distinct binary outcome token IDs"
+            ));
+        }
+
+        let mut s = self.inner.lock();
+        for (label, aid) in [("YES", yes_asset_id), ("NO", no_asset_id)] {
+            let held = s.positions.get(aid).map(|p| p.shares).unwrap_or(0.0);
+            let reserved_sell: f64 = s
+                .orders
+                .values()
+                .filter(|o| {
+                    (o.status == "OPEN" || o.status == "PARTIAL")
+                        && o.side == "SELL"
+                        && o.asset_id == aid
+                })
+                .map(|o| o.remaining_size)
+                .sum();
+            let free_shares = held - reserved_sell;
+            if pairs > free_shares + 1e-6 {
+                return Err(anyhow!(
+                    "Insufficient unreserved {label} shares for CTF Merge: need {pairs:.2}, available {:.2}",
+                    free_shares.max(0.0)
+                ));
+            }
+        }
+
+        let yes_avg = s.positions.get(yes_asset_id).map(|p| p.avg_entry).unwrap_or(0.5);
+        let no_avg = s.positions.get(no_asset_id).map(|p| p.avg_entry).unwrap_or(0.5);
+        let pair_pnl = pairs * (1.0 - (yes_avg + no_avg));
+
+        for aid in [yes_asset_id, no_asset_id] {
+            if let Some(pos) = s.positions.get_mut(aid) {
+                let rem = (pos.shares - pairs).max(0.0);
+                pos.shares = if rem <= 1e-6 { 0.0 } else { rem };
+                pos.realized_pnl += pair_pnl * 0.5;
+            }
+        }
+        s.realized_pnl_usd += pair_pnl;
+        s.cash_usd += pairs;
+        Ok(())
     }
 }
 
@@ -592,5 +706,172 @@ mod tests {
         assert!(fills[0].is_maker);
         let snap = engine.snapshot();
         assert!(snap.realized_pnl_usd > 9.0);
+    }
+
+    #[test]
+    fn paper_fak_partial_fill_status_and_remaining_size() {
+        let engine = PaperEngine::new(1000.0);
+        let mut book = FastOrderBook::new("tok_part".into(), "cond_part".into(), 0.01);
+        book.apply_snapshot(&[(0.48, 200.0)], &[(0.50, 40.0)], 1, None);
+
+        let partial = engine
+            .place_order(
+                PaperOrderParams {
+                    asset_id: "tok_part".into(),
+                    condition_id: "cond_part".into(),
+                    market_question: "Partial?".into(),
+                    outcome: "Yes".into(),
+                    side: "BUY".into(),
+                    order_type: "FAK".into(),
+                    post_only: false,
+                    price: 0.50,
+                    size: 100.0,
+                    expires_at_ms: None,
+                    fees_enabled: false,
+                    builder_maker_bps: 0,
+                    builder_taker_bps: 0,
+                },
+                Some(&book),
+            )
+            .unwrap();
+        assert_eq!(partial.order.status, "PARTIAL");
+        assert!((partial.order.filled_size - 40.0).abs() < 1e-6);
+        assert!((partial.order.remaining_size - 60.0).abs() < 1e-6);
+        assert!(engine.snapshot().open_orders.is_empty());
+
+        // Non-crossing FAK returns CANCELLED with zero fill
+        let cancelled = engine
+            .place_order(
+                PaperOrderParams {
+                    asset_id: "tok_part".into(),
+                    condition_id: "cond_part".into(),
+                    market_question: "Partial?".into(),
+                    outcome: "Yes".into(),
+                    side: "BUY".into(),
+                    order_type: "FAK".into(),
+                    post_only: false,
+                    price: 0.49,
+                    size: 50.0,
+                    expires_at_ms: None,
+                    fees_enabled: false,
+                    builder_maker_bps: 0,
+                    builder_taker_bps: 0,
+                },
+                Some(&book),
+            )
+            .unwrap();
+        assert_eq!(cancelled.order.status, "CANCELLED");
+        assert!(cancelled.order.filled_size <= 1e-6);
+
+        // Full FAK fill returns FILLED with 0 remaining
+        let full = engine
+            .place_order(
+                PaperOrderParams {
+                    asset_id: "tok_part".into(),
+                    condition_id: "cond_part".into(),
+                    market_question: "Partial?".into(),
+                    outcome: "Yes".into(),
+                    side: "BUY".into(),
+                    order_type: "FAK".into(),
+                    post_only: false,
+                    price: 0.50,
+                    size: 40.0,
+                    expires_at_ms: None,
+                    fees_enabled: false,
+                    builder_maker_bps: 0,
+                    builder_taker_bps: 0,
+                },
+                Some(&book),
+            )
+            .unwrap();
+        assert_eq!(full.order.status, "FILLED");
+        assert_eq!(full.order.remaining_size, 0.0);
+    }
+
+    #[test]
+    fn paper_split_merge_conserves_cash_and_pairs_and_checks_balances() {
+        let engine = PaperEngine::new(1000.0);
+
+        // Resting BUY reserves $950, leaving $50 available
+        engine
+            .place_order(
+                PaperOrderParams {
+                    asset_id: "tok_other".into(),
+                    condition_id: "cond_other".into(),
+                    market_question: "Other?".into(),
+                    outcome: "Yes".into(),
+                    side: "BUY".into(),
+                    order_type: "GTC".into(),
+                    post_only: false,
+                    price: 0.50,
+                    size: 1900.0,
+                    expires_at_ms: None,
+                    fees_enabled: false,
+                    builder_maker_bps: 0,
+                    builder_taker_bps: 0,
+                },
+                None,
+            )
+            .unwrap();
+
+        // Trying to split $60 (> $50 free) must fail
+        assert!(
+            engine
+                .split_position("cond1", "Q?", "yes1", "no1", "Yes", "No", 60.0)
+                .is_err()
+        );
+
+        // Splitting $50 succeeds: cash becomes $950, 50 YES @ 0.50 + 50 NO @ 0.50
+        engine
+            .split_position("cond1", "Q?", "yes1", "no1", "Yes", "No", 50.0)
+            .unwrap();
+        let snap1 = engine.snapshot();
+        assert!((snap1.cash_usd - 950.0).abs() < 1e-9);
+        let yes1 = engine.position("yes1").unwrap();
+        let no1 = engine.position("no1").unwrap();
+        assert!((yes1.shares - 50.0).abs() < 1e-9);
+        assert!((no1.shares - 50.0).abs() < 1e-9);
+        assert!((yes1.avg_entry - 0.50).abs() < 1e-9);
+        assert!((no1.avg_entry - 0.50).abs() < 1e-9);
+
+        // Resting SELL reserves 20 YES shares, leaving 30 YES free to merge
+        engine
+            .place_order(
+                PaperOrderParams {
+                    asset_id: "yes1".into(),
+                    condition_id: "cond1".into(),
+                    market_question: "Q?".into(),
+                    outcome: "Yes".into(),
+                    side: "SELL".into(),
+                    order_type: "GTC".into(),
+                    post_only: false,
+                    price: 0.70,
+                    size: 20.0,
+                    expires_at_ms: None,
+                    fees_enabled: false,
+                    builder_maker_bps: 0,
+                    builder_taker_bps: 0,
+                },
+                None,
+            )
+            .unwrap();
+
+        assert!(engine.merge_positions("yes1", "no1", 35.0).is_err());
+
+        engine.merge_positions("yes1", "no1", 30.0).unwrap();
+        let snap2 = engine.snapshot();
+        assert!((snap2.cash_usd - 980.0).abs() < 1e-9);
+        assert!((engine.position("yes1").unwrap().shares - 20.0).abs() < 1e-9);
+        assert!((engine.position("no1").unwrap().shares - 20.0).abs() < 1e-9);
+        assert!(snap2.realized_pnl_usd.abs() < 1e-9);
+
+        // Cancel open orders and merge remaining 20 pairs -> exact conservation
+        engine.cancel_all();
+        engine.merge_positions("yes1", "no1", 20.0).unwrap();
+        let snap3 = engine.snapshot();
+        assert!((snap3.cash_usd - 1000.0).abs() < 1e-9);
+        assert!(engine.position("yes1").is_none());
+        assert!(engine.position("no1").is_none());
+        assert!(snap3.realized_pnl_usd.abs() < 1e-9);
     }
 }

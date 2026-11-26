@@ -1,5 +1,6 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -42,9 +43,10 @@ pub enum FeedEvent {
     },
 }
 
+pub const MAX_INACTIVE_BOOKS: usize = 64;
+
 enum FeedCmd {
     Subscribe(Vec<String>),
-    #[allow(dead_code)]
     Unsubscribe(Vec<String>),
 }
 
@@ -52,6 +54,9 @@ pub struct MarketFeed {
     books: Arc<DashMap<String, FastOrderBook>>,
     tape: Arc<Mutex<VecDeque<TapeEntry>>>,
     subscribed: Arc<Mutex<HashSet<String>>>,
+    book_last_access: Arc<Mutex<HashMap<String, u64>>>,
+    access_clock: Arc<AtomicU64>,
+    pinned_assets: Arc<Mutex<HashSet<String>>>,
     cmd_tx: mpsc::UnboundedSender<FeedCmd>,
     events_tx: broadcast::Sender<FeedEvent>,
     whale_threshold: Arc<Mutex<f64>>,
@@ -62,6 +67,9 @@ impl MarketFeed {
         let books = Arc::new(DashMap::new());
         let tape = Arc::new(Mutex::new(VecDeque::with_capacity(200)));
         let subscribed = Arc::new(Mutex::new(HashSet::new()));
+        let book_last_access = Arc::new(Mutex::new(HashMap::new()));
+        let access_clock = Arc::new(AtomicU64::new(1));
+        let pinned_assets = Arc::new(Mutex::new(HashSet::new()));
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (events_tx, _) = broadcast::channel(2048);
         let whale_threshold = Arc::new(Mutex::new(whale_threshold_usd));
@@ -70,6 +78,9 @@ impl MarketFeed {
             books: books.clone(),
             tape: tape.clone(),
             subscribed: subscribed.clone(),
+            book_last_access,
+            access_clock,
+            pinned_assets,
             cmd_tx,
             events_tx: events_tx.clone(),
             whale_threshold: whale_threshold.clone(),
@@ -89,18 +100,114 @@ impl MarketFeed {
         feed
     }
 
+    pub fn touch_book(&self, asset_id: &str) {
+        if asset_id.is_empty() {
+            return;
+        }
+        let seq = self.access_clock.fetch_add(1, Ordering::Relaxed);
+        self.book_last_access
+            .lock()
+            .insert(asset_id.to_string(), seq);
+    }
+
     pub fn subscribe(&self, asset_ids: Vec<String>) {
-        let mut sub = self.subscribed.lock();
         let mut to_add = Vec::new();
-        for id in asset_ids {
-            if !id.is_empty() && sub.insert(id.clone()) {
-                to_add.push(id);
+        {
+            let mut sub = self.subscribed.lock();
+            for id in &asset_ids {
+                if !id.is_empty() && sub.insert(id.clone()) {
+                    to_add.push(id.clone());
+                }
             }
         }
-        drop(sub);
+        for id in &asset_ids {
+            self.touch_book(id);
+        }
         if !to_add.is_empty() {
             let _ = self.cmd_tx.send(FeedCmd::Subscribe(to_add));
         }
+        let pinned = self.pinned_assets.lock().clone();
+        self.evict_inactive_books(&pinned, MAX_INACTIVE_BOOKS);
+    }
+
+    pub fn unsubscribe(&self, asset_ids: Vec<String>) {
+        let mut removed = Vec::new();
+        {
+            let mut sub = self.subscribed.lock();
+            for id in &asset_ids {
+                if !id.is_empty() && sub.remove(id) {
+                    removed.push(id.clone());
+                }
+            }
+        }
+        {
+            let mut lru = self.book_last_access.lock();
+            for id in &asset_ids {
+                lru.remove(id);
+            }
+        }
+        for id in &asset_ids {
+            self.books.remove(id);
+        }
+        if !removed.is_empty() {
+            let _ = self.cmd_tx.send(FeedCmd::Unsubscribe(removed));
+        }
+    }
+
+    pub fn set_pinned_assets(&self, pinned: HashSet<String>) {
+        {
+            let mut p = self.pinned_assets.lock();
+            *p = pinned.clone();
+        }
+        self.evict_inactive_books(&pinned, MAX_INACTIVE_BOOKS);
+    }
+
+    pub fn evict_inactive_books(&self, pinned: &HashSet<String>, max_inactive: usize) -> usize {
+        let inactive_keys: Vec<String> = self
+            .books
+            .iter()
+            .map(|entry| entry.key().clone())
+            .filter(|k| !pinned.contains(k))
+            .collect();
+
+        if inactive_keys.len() <= max_inactive {
+            return 0;
+        }
+
+        let mut ranked: Vec<(u64, String)> = {
+            let lru = self.book_last_access.lock();
+            inactive_keys
+                .into_iter()
+                .map(|k| (lru.get(&k).copied().unwrap_or(0), k))
+                .collect()
+        };
+        ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+        let evict_count = ranked.len() - max_inactive;
+        let to_evict: Vec<String> = ranked.into_iter().take(evict_count).map(|(_, k)| k).collect();
+
+        for k in &to_evict {
+            self.books.remove(k);
+        }
+        {
+            let mut lru = self.book_last_access.lock();
+            for k in &to_evict {
+                lru.remove(k);
+            }
+        }
+        let unsub_ids: Vec<String> = {
+            let mut sub = self.subscribed.lock();
+            to_evict
+                .iter()
+                .filter(|k| sub.remove(*k))
+                .cloned()
+                .collect()
+        };
+        if !unsub_ids.is_empty() {
+            let _ = self.cmd_tx.send(FeedCmd::Unsubscribe(unsub_ids));
+        }
+
+        evict_count
     }
 
     pub fn set_whale_threshold(&self, usd: f64) {
@@ -118,22 +225,46 @@ impl MarketFeed {
         ts_ms: i64,
         hash: Option<String>,
     ) -> BookView {
-        let mut entry = self
-            .books
-            .entry(asset_id.to_string())
-            .or_insert_with(|| FastOrderBook::new(asset_id.to_string(), market_id.to_string(), tick_size));
-        entry.set_tick_size(tick_size);
-        entry.apply_snapshot(bids, asks, ts_ms, hash);
-        if let Some(lt) = last_trade {
-            entry.last_trade_price = Some(lt);
-        }
-        let view = entry.to_view(60);
+        self.touch_book(asset_id);
+        let view = {
+            let mut entry = self
+                .books
+                .entry(asset_id.to_string())
+                .or_insert_with(|| {
+                    FastOrderBook::new(asset_id.to_string(), market_id.to_string(), tick_size)
+                });
+            entry.set_tick_size(tick_size);
+            entry.apply_snapshot(bids, asks, ts_ms, hash);
+            if let Some(lt) = last_trade {
+                entry.last_trade_price = Some(lt);
+            }
+            entry.to_view(60)
+        };
+        let pinned = self.pinned_assets.lock().clone();
+        self.evict_inactive_books(&pinned, MAX_INACTIVE_BOOKS);
         let _ = self.events_tx.send(FeedEvent::Book { view: view.clone() });
         view
     }
 
+    pub fn with_book<R>(&self, asset_id: &str, f: impl FnOnce(&FastOrderBook) -> R) -> Option<R> {
+        self.touch_book(asset_id);
+        self.books.get(asset_id).map(|b| f(&*b))
+    }
+
+    pub fn get_tick_size_ticks(&self, asset_id: &str) -> Option<usize> {
+        self.books.get(asset_id).map(|b| b.tick_size_ticks)
+    }
+
     pub fn get_book_view(&self, asset_id: &str, levels: usize) -> Option<BookView> {
         self.books.get(asset_id).map(|b| b.to_view(levels))
+    }
+
+    /// Zero-allocation O(1) top-of-book lookup returning `(best_bid, best_ask, mid)`.
+    #[inline]
+    pub fn get_top_of_book(&self, asset_id: &str) -> Option<(Option<f64>, Option<f64>, Option<f64>)> {
+        self.books
+            .get(asset_id)
+            .map(|b| (b.best_bid(), b.best_ask(), b.mid()))
     }
 
     pub fn get_book_clone(&self, asset_id: &str) -> Option<FastOrderBook> {
@@ -450,5 +581,94 @@ fn process_single_event(
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn top_of_book_zero_alloc_lookup() {
+        let telemetry = Arc::new(Telemetry::new());
+        let feed = MarketFeed::spawn("ws://127.0.0.1:1".into(), telemetry, 500.0);
+
+        feed.seed_book(
+            "tok1",
+            "cond1",
+            0.01,
+            &[(0.48, 100.0)],
+            &[(0.50, 100.0)],
+            Some(0.49),
+            1,
+            None,
+        );
+
+        assert_eq!(
+            feed.get_top_of_book("tok1"),
+            Some((Some(0.48), Some(0.50), Some(0.49)))
+        );
+        assert!(feed.get_top_of_book("missing").is_none());
+    }
+
+    #[tokio::test]
+    async fn top_of_book_matches_book_view_edge_cases() {
+        let telemetry = Arc::new(Telemetry::new());
+        let feed = MarketFeed::spawn("ws://127.0.0.1:1".into(), telemetry, 500.0);
+
+        let check_equiv = |asset: &str| {
+            let top = feed.get_top_of_book(asset).unwrap();
+            let view = feed.get_book_view(asset, 1).unwrap();
+            assert_eq!(top, (view.best_bid, view.best_ask, view.mid), "mismatch on {asset}");
+        };
+
+        // 1. Empty book
+        feed.seed_book("empty", "c1", 0.01, &[], &[], None, 1, None);
+        check_equiv("empty");
+        assert_eq!(feed.get_top_of_book("empty"), Some((None, None, None)));
+
+        // 2. Bid-only book (one-sided)
+        feed.seed_book("bid_only", "c2", 0.01, &[(0.42, 50.0)], &[], None, 2, None);
+        check_equiv("bid_only");
+        assert_eq!(feed.get_top_of_book("bid_only"), Some((Some(0.42), None, Some(0.42))));
+
+        // 3. Ask-only book (one-sided)
+        feed.seed_book("ask_only", "c3", 0.01, &[], &[(0.61, 80.0)], None, 3, None);
+        check_equiv("ask_only");
+        assert_eq!(feed.get_top_of_book("ask_only"), Some((None, Some(0.61), Some(0.61))));
+
+        // 4. Crossed book (best_bid > best_ask)
+        feed.seed_book("crossed", "c4", 0.01, &[(0.55, 20.0)], &[(0.51, 30.0)], None, 4, None);
+        check_equiv("crossed");
+        assert_eq!(
+            feed.get_top_of_book("crossed"),
+            Some((Some(0.55), Some(0.51), Some(0.53)))
+        );
+    }
+
+    #[tokio::test]
+    async fn evict_inactive_books_preserves_pinned_and_lru() {
+        let telemetry = Arc::new(Telemetry::new());
+        let feed = MarketFeed::spawn("ws://127.0.0.1:1".into(), telemetry, 500.0);
+
+        for i in 0..5 {
+            let id = format!("tok_{i}");
+            feed.subscribe(vec![id.clone()]);
+            feed.seed_book(&id, "c", 0.01, &[(0.45, 10.0)], &[(0.55, 10.0)], None, i, None);
+        }
+        // Touch tok_0 via with_book so it becomes most recently used among unpinned
+        let got = feed.with_book("tok_0", |b| b.best_bid()).flatten();
+        assert_eq!(got, Some(0.45));
+
+        let pinned: HashSet<String> = ["tok_1".to_string()].into_iter().collect();
+        let evicted = feed.evict_inactive_books(&pinned, 2);
+        assert_eq!(evicted, 2);
+
+        // tok_1 (pinned), tok_0 (recently touched), tok_4 (latest seeded) remain; tok_2 & tok_3 evicted
+        assert!(feed.get_top_of_book("tok_1").is_some());
+        assert!(feed.get_top_of_book("tok_0").is_some());
+        assert!(feed.get_top_of_book("tok_4").is_some());
+        assert!(feed.get_top_of_book("tok_2").is_none());
+        assert!(feed.get_top_of_book("tok_3").is_none());
     }
 }

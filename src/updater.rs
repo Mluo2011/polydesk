@@ -9,6 +9,38 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{APP_VERSION, BUILD_TARGET};
 
+pub const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
+pub const MAX_BINARY_BYTES: usize = 150 * 1024 * 1024;
+
+async fn read_response_capped(
+    mut resp: reqwest::Response,
+    max_bytes: usize,
+    label: &str,
+) -> Result<Vec<u8>> {
+    if let Some(len) = resp.content_length()
+        && len > max_bytes as u64
+    {
+        return Err(anyhow!(
+            "{label} exceeds maximum allowed size ({len} > {max_bytes} bytes)"
+        ));
+    }
+    let initial = resp
+        .content_length()
+        .and_then(|n| usize::try_from(n).ok())
+        .map(|n| n.min(max_bytes).min(1024 * 1024))
+        .unwrap_or(0);
+    let mut buf = Vec::with_capacity(initial);
+    while let Some(chunk) = resp.chunk().await? {
+        if buf.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(anyhow!(
+                "{label} exceeded maximum allowed download size ({max_bytes} bytes)"
+            ));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateStatus {
     pub current_version: String,
@@ -38,20 +70,45 @@ struct GhAsset {
     browser_download_url: String,
 }
 
-pub fn expected_asset_name() -> String {
+pub fn platform_asset_suffix() -> &'static str {
     if cfg!(target_os = "windows") {
-        "polydesk-windows-x86_64.exe".to_string()
+        "windows-x86_64.exe"
     } else if cfg!(target_os = "macos") {
         if cfg!(target_arch = "aarch64") {
-            "polydesk-macos-arm64".to_string()
+            "macos-arm64"
         } else {
-            "polydesk-macos-x86_64".to_string()
+            "macos-x86_64"
         }
     } else if cfg!(target_arch = "aarch64") {
-        "polydesk-linux-aarch64".to_string()
+        "linux-aarch64"
     } else {
-        "polydesk-linux-x86_64".to_string()
+        "linux-x86_64"
     }
+}
+
+pub fn expected_asset_name() -> String {
+    format!("polydirect-{}", platform_asset_suffix())
+}
+
+fn find_matching_asset<'a>(assets: &'a [GhAsset], suffix: &str) -> Option<&'a GhAsset> {
+    let candidates = [
+        (format!("polydirect-{suffix}"), false),
+        (format!("polydirect-{suffix}"), true),
+        (format!("polydesk-{suffix}"), false),
+        (format!("polydesk-{suffix}"), true),
+    ];
+    for (needle, ci) in candidates {
+        if let Some(found) = assets.iter().find(|a| {
+            if ci {
+                a.name.eq_ignore_ascii_case(&needle)
+            } else {
+                a.name == needle
+            }
+        }) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// Remove leftover `.old` executable left behind by a previous Windows self-update.
@@ -131,7 +188,17 @@ pub async fn check_github_release(http: &Client, repo: &str) -> UpdateStatus {
         };
     }
 
-    let rel: GhRelease = match resp.json().await {
+    let rel_bytes = match read_response_capped(resp, MAX_MANIFEST_BYTES, "GitHub release JSON").await
+    {
+        Ok(b) => b,
+        Err(e) => {
+            return UpdateStatus {
+                error: Some(format!("Failed reading GitHub release JSON: {e}")),
+                ..base
+            };
+        }
+    };
+    let rel: GhRelease = match serde_json::from_slice(&rel_bytes) {
         Ok(r) => r,
         Err(e) => {
             return UpdateStatus {
@@ -146,12 +213,12 @@ pub async fn check_github_release(http: &Client, repo: &str) -> UpdateStatus {
     let latest_ver = Version::parse(&latest_str).ok();
     let update_available = latest_ver.as_ref().is_some_and(|lv| lv > &current_ver);
 
-    let want_asset = expected_asset_name();
-    let asset_url = rel
-        .assets
-        .iter()
-        .find(|a| a.name == want_asset)
-        .map(|a| a.browser_download_url.clone());
+    let suffix = platform_asset_suffix();
+    let matched_asset = find_matching_asset(&rel.assets, suffix);
+    let want_asset = matched_asset
+        .map(|a| a.name.clone())
+        .unwrap_or_else(expected_asset_name);
+    let asset_url = matched_asset.map(|a| a.browser_download_url.clone());
     let checksum_url = rel
         .assets
         .iter()
@@ -192,7 +259,8 @@ pub fn verify_sha256_manifest(manifest: &str, asset_name: &str, bytes: &[u8]) ->
     Ok(())
 }
 
-/// Download release binary, verify SHA-256 against `SHA256SUMS.txt`, and atomically replace self.
+/// Download release binary, verify SHA-256 download integrity against GitHub Release
+/// `SHA256SUMS.txt` over HTTPS (not detached code signing), and atomically replace self.
 pub async fn download_and_apply_update(http: &Client, repo: &str) -> Result<String> {
     let status = check_github_release(http, repo).await;
     if let Some(err) = status.error {
@@ -218,21 +286,18 @@ pub async fn download_and_apply_update(http: &Client, repo: &str) -> Result<Stri
         return Err(anyhow!("Refusing untrusted non-GitHub release asset URL"));
     }
 
-    let checksum_text = http
+    let checksum_resp = http
         .get(&checksum_url)
         .send()
         .await?
-        .error_for_status()?
-        .text()
-        .await?;
+        .error_for_status()?;
+    let checksum_bytes =
+        read_response_capped(checksum_resp, MAX_MANIFEST_BYTES, "SHA256SUMS.txt").await?;
+    let checksum_text =
+        String::from_utf8(checksum_bytes).context("SHA256SUMS.txt is not valid UTF-8")?;
 
-    let bytes = http
-        .get(&asset_url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
+    let bin_resp = http.get(&asset_url).send().await?.error_for_status()?;
+    let bytes = read_response_capped(bin_resp, MAX_BINARY_BYTES, "Release binary").await?;
 
     verify_sha256_manifest(&checksum_text, &asset_name, &bytes)?;
 
@@ -277,17 +342,100 @@ mod tests {
 
     #[test]
     fn sha256_manifest_verification_works() {
-        let data = b"polydesk-test-binary";
+        let data = b"polydirect-test-binary";
         let hash = hex::encode(Sha256::digest(data));
-        let manifest = format!("{hash}  polydesk-linux-x86_64\n0000  other-file\n");
-        assert!(verify_sha256_manifest(&manifest, "polydesk-linux-x86_64", data).is_ok());
-        assert!(verify_sha256_manifest(&manifest, "polydesk-linux-x86_64", b"tampered").is_err());
+        let manifest = format!("{hash}  polydirect-linux-x86_64\n0000  other-file\n");
+        assert!(verify_sha256_manifest(&manifest, "polydirect-linux-x86_64", data).is_ok());
+        assert!(verify_sha256_manifest(&manifest, "polydirect-linux-x86_64", b"tampered").is_err());
         assert!(verify_sha256_manifest(&manifest, "missing-bin", data).is_err());
+        assert!(expected_asset_name().starts_with("polydirect-"));
+        assert!(is_valid_github_repo("Mluo2011/polydirect"));
         assert!(is_valid_github_repo("Mluo2011/polydesk"));
         assert!(!is_valid_github_repo("../evil/repo"));
         assert!(!is_valid_github_repo("owner/repo?foo=bar"));
+        assert!(is_trusted_github_asset_url("https://github.com/Mluo2011/polydirect/releases/download/v0.2.5/polydirect-linux-x86_64"));
         assert!(is_trusted_github_asset_url("https://github.com/Mluo2011/polydesk/releases/download/v0.2.5/polydesk-linux-x86_64"));
-        assert!(!is_trusted_github_asset_url("http://github.com/Mluo2011/polydesk/releases/download/v0.2.5/bin"));
+        assert!(!is_trusted_github_asset_url("http://github.com/Mluo2011/polydirect/releases/download/v0.2.5/bin"));
         assert!(!is_trusted_github_asset_url("https://evil.example/bin"));
+
+        let legacy_only = vec![
+            GhAsset {
+                name: "PolyDesk-linux-x86_64".into(),
+                browser_download_url: "https://github.com/Mluo2011/polydesk/releases/download/v0.2.4/PolyDesk-linux-x86_64".into(),
+            },
+            GhAsset {
+                name: "polydesk-linux-x86_64".into(),
+                browser_download_url: "https://github.com/Mluo2011/polydesk/releases/download/v0.2.5/polydesk-linux-x86_64".into(),
+            },
+        ];
+        assert_eq!(
+            find_matching_asset(&legacy_only, "linux-x86_64").map(|a| a.name.as_str()),
+            Some("polydesk-linux-x86_64")
+        );
+
+        let mixed = vec![
+            GhAsset {
+                name: "polydesk-linux-x86_64".into(),
+                browser_download_url: "https://github.com/Mluo2011/polydesk/releases/download/v0.2.5/polydesk-linux-x86_64".into(),
+            },
+            GhAsset {
+                name: "PolyDirect-linux-x86_64".into(),
+                browser_download_url: "https://github.com/Mluo2011/polydirect/releases/download/v0.2.6/PolyDirect-linux-x86_64".into(),
+            },
+            GhAsset {
+                name: "polydirect-linux-x86_64".into(),
+                browser_download_url: "https://github.com/Mluo2011/polydirect/releases/download/v0.2.6/polydirect-linux-x86_64".into(),
+            },
+        ];
+        assert_eq!(
+            find_matching_asset(&mixed, "linux-x86_64").map(|a| a.name.as_str()),
+            Some("polydirect-linux-x86_64")
+        );
+
+        assert_eq!(
+            find_matching_asset(&mixed[..2], "linux-x86_64").map(|a| a.name.as_str()),
+            Some("PolyDirect-linux-x86_64")
+        );
+    }
+
+    #[tokio::test]
+    async fn read_response_capped_enforces_byte_limits() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        async fn serve_once(response: &'static [u8]) -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                if let Ok((mut sock, _)) = listener.accept().await {
+                    let mut buf = [0u8; 512];
+                    let _ = sock.read(&mut buf).await;
+                    let _ = sock.write_all(response).await;
+                    let _ = sock.shutdown().await;
+                }
+            });
+            format!("http://{addr}/test")
+        }
+
+        let http = Client::new();
+
+        // 1. Below limit succeeds
+        let url_ok = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello").await;
+        let resp_ok = http.get(&url_ok).send().await.unwrap();
+        let bytes = read_response_capped(resp_ok, 16, "small").await.unwrap();
+        assert_eq!(bytes, b"hello");
+
+        // 2. Oversized via Content-Length rejected
+        let url_cl = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 64\r\nConnection: close\r\n\r\n0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").await;
+        let resp_cl = http.get(&url_cl).send().await.unwrap();
+        assert!(read_response_capped(resp_cl, 16, "cl-over").await.is_err());
+
+        // 3. Oversized without Content-Length (chunked / streamed) rejected while reading
+        let url_chunked = serve_once(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n14\r\n01234567890123456789\r\n0\r\n\r\n",
+        )
+        .await;
+        let resp_chunked = http.get(&url_chunked).send().await.unwrap();
+        assert!(read_response_capped(resp_chunked, 16, "stream-over").await.is_err());
     }
 }

@@ -10,6 +10,7 @@ use polydesk::vault::WalletSignatureType;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::runtime::Runtime;
+use zeroize::Zeroize;
 
 struct FfiHost {
     rt: Runtime,
@@ -86,6 +87,7 @@ enum FfiRequest {
     },
     WalletUnlock { password: String },
     WalletLock,
+    WalletForceLock,
     SyncAllowance,
     DepositAddresses { wallet_addr: String },
 }
@@ -247,7 +249,7 @@ fn handle_call(raw: *const c_char) -> Result<Value, String> {
                 Ok(json!(c.execution.account_state().await))
             }
             FfiRequest::SetMode { mode } => {
-                c.execution.set_mode(mode).map_err(|e| e.to_string())?;
+                c.execution.set_mode(mode).await.map_err(|e| e.to_string())?;
                 Ok(json!(c.execution.account_state().await))
             }
             FfiRequest::WalletCreate {
@@ -265,11 +267,10 @@ fn handle_call(raw: *const c_char) -> Result<Value, String> {
                     "deposit": deposit,
                 }))
             }
-            FfiRequest::WalletReveal { password } => {
-                let wallet = c
-                    .execution
-                    .reveal_vault_backup(&password)
-                    .map_err(|e| e.to_string())?;
+            FfiRequest::WalletReveal { mut password } => {
+                let res = c.execution.reveal_vault_backup(&password);
+                password.zeroize();
+                let wallet = res.map_err(|e| e.to_string())?;
                 Ok(json!(wallet))
             }
             FfiRequest::WalletConnect {
@@ -286,15 +287,17 @@ fn handle_call(raw: *const c_char) -> Result<Value, String> {
                     .map_err(|e| e.to_string())?;
                 Ok(json!(acc))
             }
-            FfiRequest::WalletUnlock { password } => {
-                let acc = c
-                    .execution
-                    .unlock_existing_vault(&password)
-                    .await
-                    .map_err(|e| e.to_string())?;
+            FfiRequest::WalletUnlock { mut password } => {
+                let res = c.execution.unlock_existing_vault(&password).await;
+                password.zeroize();
+                let acc = res.map_err(|e| e.to_string())?;
                 Ok(json!(acc))
             }
-            FfiRequest::WalletLock => Ok(json!(c.execution.lock_wallet().await)),
+            FfiRequest::WalletLock => {
+                let acc = c.execution.lock_wallet().await.map_err(|e| e.to_string())?;
+                Ok(json!(acc))
+            }
+            FfiRequest::WalletForceLock => Ok(json!(c.execution.force_lock_wallet().await)),
             FfiRequest::SyncAllowance => {
                 let acc = c
                     .execution

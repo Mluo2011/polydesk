@@ -8,6 +8,9 @@
 *.old
 *.staged
 vault.json
+vaults/
+*.pem
+*.key
 config.toml
 paper_state.json
 .env

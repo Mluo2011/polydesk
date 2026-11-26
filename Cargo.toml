@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "polydesk"
-version = "0.2.5"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.95.0"
 description = "Native GPU ultra-low-latency Polymarket CLOB V2 trading terminal (Linux, Windows 10/11, macOS, and iOS/iPadOS via Rust FFI)"
@@ -24,8 +24,8 @@ desktop = ["dep:eframe", "dep:egui"]
 
 [dependencies]
 # Official Polymarket CLOB V2 Rust SDK (Polymarket/rs-clob-client-v2)
-polymarket_client_sdk_v2 = { version = "0.9.1", features = ["clob", "ws", "heartbeats", "bridge"] }
-alloy = { version = "1.6", default-features = false, features = ["signer-local", "signer-mnemonic", "signers"] }
+polymarket_client_sdk_v2 = { version = "0.9.1", features = ["clob", "ws", "heartbeats", "bridge", "rtds", "ctf"] }
+alloy = { version = "1.6", default-features = false, features = ["signer-local", "signer-mnemonic", "signers", "providers", "contract", "reqwest", "reqwest-rustls-tls", "sol-types"] }
 
 # Native GPU desktop GUI (Linux X11/Wayland, Windows 10/11 OpenGL, macOS) — ZERO browser / ZERO WebView!
 eframe = { version = "0.37.0", optional = true, default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "clipboard"] }
@@ -34,8 +34,10 @@ egui = { version = "0.37.0", optional = true }
 # Async runtime & networking
 tokio = { version = "1.44", features = ["full"] }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 futures = "0.3"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls", "http2", "gzip"] }
+url = "2.5"
 
 # Serialization & config
 serde = { version = "1.0", features = ["derive"] }

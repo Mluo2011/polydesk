@@ -34,19 +34,19 @@ struct RootTerminalView: View {
     @State private var ruleShares = 25.0
 
     private var canvasBg: Color {
-        scheme == .light ? Color(red: 0.945, green: 0.961, blue: 0.976) : Color(red: 0.035, green: 0.047, blue: 0.071)
+        scheme == .light ? Color(red: 245.0 / 255.0, green: 244.0 / 255.0, blue: 239.0 / 255.0) : Color(red: 15.0 / 255.0, green: 16.0 / 255.0, blue: 19.0 / 255.0)
     }
     private var panelBg: Color {
-        scheme == .light ? Color.white : Color(red: 0.051, green: 0.067, blue: 0.106)
+        scheme == .light ? Color.white : Color(red: 20.0 / 255.0, green: 22.0 / 255.0, blue: 26.0 / 255.0)
     }
     private var cardBg: Color {
-        scheme == .light ? Color.white : Color(red: 0.067, green: 0.086, blue: 0.133)
+        scheme == .light ? Color.white : Color(red: 24.0 / 255.0, green: 26.0 / 255.0, blue: 31.0 / 255.0)
     }
     private var subtleFill: Color {
         scheme == .light ? Color.black.opacity(0.045) : Color.white.opacity(0.06)
     }
     private var dividerColor: Color {
-        scheme == .light ? Color.black.opacity(0.10) : Color.white.opacity(0.08)
+        scheme == .light ? Color(red: 223.0 / 255.0, green: 220.0 / 255.0, blue: 210.0 / 255.0) : Color(red: 39.0 / 255.0, green: 43.0 / 255.0, blue: 52.0 / 255.0)
     }
 
     var body: some View {
@@ -148,7 +148,7 @@ struct RootTerminalView: View {
             Circle()
                 .fill((engine.telemetry?.ws_connected ?? false) ? Color.green : Color.red)
                 .frame(width: 9, height: 9)
-            Text("PolyDesk").font(.headline.bold())
+            Text("PolyDirect").font(.headline.bold())
 
             let isLive = engine.account?.mode == "live"
             Button(isLive ? engine.t("LIVE", "实盘") : engine.t("PAPER", "模拟")) { showWallet = true }
