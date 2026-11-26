@@ -267,6 +267,7 @@ final class EngineBridge: ObservableObject {
     private let queue = DispatchQueue(label: "com.polydesk.ffi", qos: .userInteractive)
     private var timer: Timer?
     private var oracleTimer: Timer?
+    private var lastGridLoad: Date = .distantPast
 
     init() {
         let dataPath = Self.prepareSecureDataDirectory()
@@ -706,6 +707,11 @@ final class EngineBridge: ObservableObject {
             switch res {
             case .success(let f):
                 self.shortFrame = f.active ? f : nil
+                // Keep the 4-up pool fresh so "Next Round" always has the live slot.
+                if f.active, let secs = f.secs_left, secs <= 2,
+                   Date().timeIntervalSince(self.lastGridLoad) > 15 {
+                    self.loadGrid(interval: (f.interval_mins ?? 5) == 15 ? "15m" : "5m")
+                }
             case .failure:
                 self.shortFrame = nil
             }
@@ -714,6 +720,7 @@ final class EngineBridge: ObservableObject {
 
     /// Load the 4-up 5m grid (BTC / ETH / SOL / XRP) with per-tile oracle data.
     func loadGrid(interval: String = "5m") {
+        lastGridLoad = Date()
         call(["op": "short_timeframe_markets", "interval": interval, "limit": 4], as: GridPayload.self) { [weak self] res in
             guard let self else { return }
             switch res {
@@ -726,12 +733,16 @@ final class EngineBridge: ObservableObject {
     /// Jump to the next slot for the same coin (used by the strip's Next Round button).
     func advanceNextRound() {
         guard let m = activeMarket else { return }
-        let pool = gridMarkets.map(\.market).filter { $0.slug != m.slug }
-        if let next = pool.first(where: { $0.slug.hasPrefix(String(m.slug.split(separator: "-").prefix(1).joined())) }) {
-            selectMarket(next)
+        let coin = String(m.slug.split(separator: "-").first ?? "")
+        if let entry = gridMarkets.first(where: {
+            $0.market.condition_id != m.condition_id
+                && $0.market.slug.hasPrefix(coin)
+                && ($0.oracle.secs_left ?? 0) > 0
+        }) {
+            selectMarket(entry.market)
             return
         }
-        loadGrid()
+        loadGrid(interval: (shortFrame?.interval_mins ?? 5) == 15 ? "15m" : "5m")
         showToast(t("Next round not live yet", "下一轮尚未上线"))
     }
 
