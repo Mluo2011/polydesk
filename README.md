@@ -1,7 +1,26 @@
 # PolyDirect — 100% Native Low-Latency Polymarket CLOB V2 Terminal
 
 **Zero browser. Zero Electron. Zero WebView. Zero localhost web server.**
-Pure native local apps sharing one ultra-low-latency Rust CLOB V2 engine across **Linux**, **Windows 10/11**, **macOS**, and **iOS / iPadOS** — with built-in **English / 简体中文**, **Polymarket Bridge Real-Money Deposit**, **Polymarket CLOB V2 Builder Fee (Take a Cut)**, and **SHA-256 verified GitHub Auto-Update**.
+Pure native local apps sharing one ultra-low-latency Rust CLOB V2 engine across **Linux**, **Windows 10/11**, **macOS**, and **iOS / iPadOS** — with built-in **English / 简体中文**, **5m/15m Chainlink 60s TWAP vs Price to Beat**, **Multi-Ladder 4-Up Split Grid**, **On-Chain CTF Split/Merge/Redeem**, **Polymarket Bridge Real-Money Deposit**, and **SHA-256 verified GitHub Auto-Update**.
+
+[![Release](https://github.com/Mluo2011/polydirect/actions/workflows/release.yml/badge.svg)](https://github.com/Mluo2011/polydirect/actions/workflows/release.yml)
+[![Website](https://img.shields.io/badge/Website-polydirect.appdeck.org-1d4ed8)](https://polydirect.appdeck.org)
+[![Latest Release](https://img.shields.io/github/v/release/Mluo2011/polydirect)](https://github.com/Mluo2011/polydirect/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
+![PolyDirect v0.3.1 Native Terminal](assets/polydirect-preview.png)
+
+---
+
+## Verify Before Running (安全验证)
+
+1. **100% open source (MIT)** — every release binary is compiled directly by GitHub Actions ([`release.yml`](.github/workflows/release.yml)) from this public source tree.
+2. **Verify checksums** against [`SHA256SUMS.txt`](https://github.com/Mluo2011/polydirect/releases/latest/download/SHA256SUMS.txt) before running, or build from source yourself:
+   - Linux / macOS: `sha256sum -c SHA256SUMS.txt` (macOS: `shasum -a 256 -c SHA256SUMS.txt`)
+   - Windows PowerShell: `Get-FileHash .\PolyDirect-Setup.exe -Algorithm SHA256`
+   - Build locally: `cargo build --release`
+3. **Try Paper Mode first** — PolyDirect launches straight into **PAPER** mode with a simulated `$1,000` balance, live CLOB V2 orderbooks, and live 5m/15m Chainlink 60s TWAP feeds with **no wallet or sign-up required**.
+4. **Local-only key custody** — if you enable **LIVE** mode, private keys stay on your device encrypted with Argon2id + AES-256-GCM and orders are signed locally via EIP-712. Always use a dedicated hot trading wallet — never import a cold hardware-wallet seed.
 
 ---
 
