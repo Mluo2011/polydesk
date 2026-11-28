@@ -377,6 +377,44 @@ impl ExecutionEngine {
         }
     }
 
+    /// Re-target the CLOB client after `clob_host` changed at runtime (hot patch or
+    /// Settings). Without this the process keeps three different CLOB hosts in play:
+    /// `public_clob` (built once in `new`), `MarketClient` REST, and whatever host
+    /// `authenticate_live` last saw. A preview could then be priced from a healthy
+    /// book while orders route somewhere else entirely.
+    ///
+    /// Clears any authenticated session: L2 credentials are scoped to a host, so a
+    /// session must never survive a host change.
+    pub async fn rebuild_clob(&self, host: &str) -> Result<()> {
+        let clean = host.trim().trim_end_matches('/').to_string();
+        let parsed = url::Url::parse(&clean).context("invalid CLOB host")?;
+        if parsed.scheme() != "https" {
+            return Err(anyhow!("CLOB host must use https:// ({clean})"));
+        }
+        if parsed.username() != "" || parsed.password().is_some() {
+            return Err(anyhow!("CLOB host must not embed credentials"));
+        }
+
+        let new_public = ClobClient::new(&clean, ClobConfig::default()).ok();
+
+        let had_live = {
+            let mut live = self.live.write().await;
+            let had = live.is_some();
+            *live = None;
+            had
+        };
+        *self.public_clob.write() = new_public;
+        *self.mode.write() = TradingMode::Paper;
+        if had_live {
+            warn!(
+                new_host = %clean,
+                "CLOB host changed — live session closed, re-authenticate to trade live"
+            );
+        }
+        let _ = self.events_tx.send(ExecEvent::AccountUpdated);
+        Ok(())
+    }
+
     pub fn subscribe_events(&self) -> broadcast::Receiver<ExecEvent> {
         self.events_tx.subscribe()
     }

@@ -35,21 +35,11 @@ struct RootTerminalView: View {
     @State private var trailCents = 3.0
     @State private var ruleShares = 25.0
 
-    private var canvasBg: Color {
-        scheme == .light ? Color(red: 245.0 / 255.0, green: 244.0 / 255.0, blue: 239.0 / 255.0) : Color(red: 15.0 / 255.0, green: 16.0 / 255.0, blue: 19.0 / 255.0)
-    }
-    private var panelBg: Color {
-        scheme == .light ? Color.white : Color(red: 20.0 / 255.0, green: 22.0 / 255.0, blue: 26.0 / 255.0)
-    }
-    private var cardBg: Color {
-        scheme == .light ? Color.white : Color(red: 24.0 / 255.0, green: 26.0 / 255.0, blue: 31.0 / 255.0)
-    }
-    private var subtleFill: Color {
-        scheme == .light ? Color.black.opacity(0.045) : Color.white.opacity(0.06)
-    }
-    private var dividerColor: Color {
-        scheme == .light ? Color(red: 223.0 / 255.0, green: 220.0 / 255.0, blue: 210.0 / 255.0) : Color(red: 39.0 / 255.0, green: 43.0 / 255.0, blue: 52.0 / 255.0)
-    }
+    private var canvasBg: Color { PolyTheme.canvasBg(scheme) }
+    private var panelBg: Color { PolyTheme.panelBg(scheme) }
+    private var cardBg: Color { PolyTheme.cardBg(scheme) }
+    private var subtleFill: Color { PolyTheme.chipBg(scheme) }
+    private var dividerColor: Color { PolyTheme.border(scheme) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -148,32 +138,39 @@ struct RootTerminalView: View {
                 .buttonStyle(.bordered)
             }
 
-            Circle()
-                .fill((engine.telemetry?.ws_connected ?? false) ? Color.green : Color.red)
-                .frame(width: 9, height: 9)
+            HStack(spacing: 3) {
+                RoundedRectangle(cornerRadius: 1).fill(PolyTheme.emerald(scheme)).frame(width: 4, height: 11)
+                RoundedRectangle(cornerRadius: 1).fill((engine.telemetry?.ws_connected ?? false) ? PolyTheme.azure(scheme) : PolyTheme.crimson(scheme)).frame(width: 4, height: 15)
+            }
+            .padding(4)
+            .background(subtleFill)
+            .cornerRadius(6)
             Text("PolyDirect").font(.headline.bold())
 
             let isLive = engine.account?.mode == "live"
-            Button(isLive ? engine.t("LIVE", "实盘") : engine.t("PAPER", "模拟")) { showWallet = true }
+            let modeCol = isLive ? PolyTheme.emerald(scheme) : PolyTheme.amber(scheme)
+            Button(isLive ? engine.t("● LIVE", "● 实盘") : engine.t("● PAPER", "● 模拟")) { showWallet = true }
                 .font(.caption.bold())
                 .padding(.horizontal, 10).padding(.vertical, 4)
-                .background((isLive ? Color.green : Color.orange).opacity(0.2))
-                .foregroundColor(isLive ? .green : .orange)
+                .background(modeCol.opacity(0.16))
+                .overlay(Capsule().stroke(modeCol.opacity(0.6), lineWidth: 1))
+                .foregroundColor(modeCol)
                 .cornerRadius(99)
 
             let cash = isLive ? (engine.account?.live_balance_usd ?? 0) : (engine.account?.paper.cash_usd ?? 1000)
             let positions = (isLive ? engine.account?.live_positions : engine.account?.paper.positions) ?? []
             let posVal = positions.reduce(0.0) { $0 + $1.shares * $1.avg_entry }
             HStack(spacing: 8) {
-                Text("\(engine.t("Portfolio", "总资产")) \(String(format: "$%.2f", cash + posVal))")
+                Text("\(engine.t("Equity", "总资产")) \(String(format: "$%.2f", cash + posVal))")
                     .font(.caption.monospacedDigit().bold())
                     .foregroundColor(.primary)
                 Text("\(engine.t("Cash", "余额")) \(String(format: "$%.2f", cash))")
                     .font(.caption.monospacedDigit().bold())
-                    .foregroundColor(.green)
+                    .foregroundColor(PolyTheme.emeraldText(scheme))
             }
             .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(subtleFill)
+            .background(PolyTheme.subBg(scheme))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(dividerColor, lineWidth: 1))
             .cornerRadius(8)
 
             if let tel = engine.telemetry {
@@ -302,14 +299,22 @@ struct RootTerminalView: View {
                         } label: {
                             VStack(alignment: .leading, spacing: 5) {
                                 Text(m.displayQuestion(zh: engine.zh))
-                                    .font(.caption)
+                                    .font(.caption.weight(.semibold))
                                     .foregroundColor(.primary)
                                     .lineLimit(2)
                                     .multilineTextAlignment(.leading)
+                                let p0 = max(0.03, min(0.97, m.outcome_prices.first ?? 0.5))
+                                GeometryReader { g in
+                                    ZStack(alignment: .leading) {
+                                        Capsule().fill(PolyTheme.crimson(scheme).opacity(0.35))
+                                        Capsule().fill(PolyTheme.emerald(scheme)).frame(width: g.size.width * p0)
+                                    }
+                                }
+                                .frame(height: 3)
                                 HStack {
-                                    Text(engine.oddsFmt.format(m.outcome_prices.first, tick: m.tick_size)).foregroundColor(.green)
+                                    Text(engine.oddsFmt.format(m.outcome_prices.first, tick: m.tick_size)).foregroundColor(PolyTheme.emeraldText(scheme))
                                     Text("/").foregroundColor(.secondary)
-                                    Text(engine.oddsFmt.format(m.outcome_prices.dropFirst().first, tick: m.tick_size)).foregroundColor(.red)
+                                    Text(engine.oddsFmt.format(m.outcome_prices.dropFirst().first, tick: m.tick_size)).foregroundColor(PolyTheme.crimsonText(scheme))
                                     Spacer()
                                     if m.volume_24hr > 0 {
                                         Text(String(format: "$%.0fk", m.volume_24hr / 1000)).foregroundColor(.secondary)
@@ -318,8 +323,8 @@ struct RootTerminalView: View {
                                 .font(.caption2.monospacedDigit())
                             }
                             .padding(10)
-                            .background(sel ? Color.blue.opacity(0.14) : subtleFill)
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(sel ? Color.blue : dividerColor, lineWidth: 1))
+                            .background(sel ? PolyTheme.azure(scheme).opacity(0.14) : PolyTheme.subBg(scheme))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(sel ? PolyTheme.azure(scheme) : dividerColor, lineWidth: 1))
                             .cornerRadius(8)
                         }
                     }
@@ -355,17 +360,21 @@ struct RootTerminalView: View {
                             let name = m.displayOutcome(idx, zh: engine.zh)
                             let staticPx = idx < m.outcome_prices.count ? m.outcome_prices[idx] : nil
                             let px = (idx == engine.activeOutcomeIdx ? (quickBuy ? engine.book?.best_ask : engine.book?.best_bid) ?? engine.book?.mid : nil) ?? staticPx
+                            let oc = idx == 0 ? PolyTheme.emerald(scheme) : PolyTheme.crimson(scheme)
+                            let active = engine.activeOutcomeIdx == idx
                             Button {
                                 engine.selectMarket(m, outcomeIdx: idx)
                             } label: {
-                                VStack(spacing: 3) {
+                                VStack(spacing: 4) {
                                     Text(name).font(.caption.bold()).lineLimit(1)
                                     Text(engine.oddsFmt.format(px, tick: m.tick_size)).font(.subheadline.monospacedDigit().bold())
+                                    Capsule().fill(oc.opacity(active ? 1.0 : 0.35)).frame(height: 3).padding(.horizontal, 10)
                                 }
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 10)
-                                .background(engine.activeOutcomeIdx == idx ? (idx == 0 ? Color.green.opacity(0.24) : Color.red.opacity(0.24)) : subtleFill)
-                                .foregroundColor(idx == 0 ? .green : .red)
+                                .background(active ? oc.opacity(0.18) : PolyTheme.subBg(scheme))
+                                .overlay(RoundedRectangle(cornerRadius: 10).stroke(active ? oc : dividerColor, lineWidth: active ? 1.4 : 1))
+                                .foregroundColor(active ? oc : .primary)
                                 .cornerRadius(10)
                             }
                         }
@@ -430,9 +439,9 @@ struct RootTerminalView: View {
                             .font(.headline.bold())
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 13)
-                            .background(quickBuy ? Color.green : Color.red)
+                            .background(quickBuy ? PolyTheme.emerald(scheme) : PolyTheme.crimson(scheme))
                             .foregroundColor(.white)
-                            .cornerRadius(11)
+                            .cornerRadius(10)
                     }
                 }
             }

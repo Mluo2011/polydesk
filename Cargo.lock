@@ -4554,7 +4554,7 @@ dependencies = [
 
 [[package]]
 name = "polydesk"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "aes-gcm",
  "alloy",
@@ -4568,6 +4568,7 @@ dependencies = [
  "egui",
  "futures",
  "hex",
+ "k256",
  "parking_lot",
  "polymarket_client_sdk_v2",
  "rand 0.8.8",
@@ -4591,7 +4592,7 @@ dependencies = [
 
 [[package]]
 name = "polydesk-ffi"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "polydesk",
  "serde",

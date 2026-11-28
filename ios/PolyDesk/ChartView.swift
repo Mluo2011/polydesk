@@ -1,8 +1,16 @@
 import SwiftUI
 
+enum ShortChartMode: String, CaseIterable {
+    case both
+    case overlay
+    case spot
+    case shares
+}
+
 struct ChartView: View {
     @ObservedObject var engine: EngineBridge
     @Environment(\.colorScheme) private var scheme
+    @State private var shortMode: ShortChartMode = .both
     @State private var showCandles = false
     @State private var showEma = false
     @State private var showSma = false
@@ -12,39 +20,283 @@ struct ChartView: View {
 
     private let intervals = ["1h", "6h", "1d", "1w", "1m", "max"]
 
+    private var isShortCrypto: Bool {
+        engine.shortFrame?.active == true
+    }
+
     var body: some View {
         VStack(spacing: 6) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 5) {
-                    Toggle("EMA9", isOn: $showEma).toggleStyle(.button).font(.caption2.monospaced())
-                    Toggle("SMA20", isOn: $showSma).toggleStyle(.button).font(.caption2.monospaced())
-                    Toggle("BB(20,2)", isOn: $showBB).toggleStyle(.button).font(.caption2.monospaced())
-                    Toggle("VWAP", isOn: $showVwap).toggleStyle(.button).font(.caption2.monospaced())
-                    Toggle("RSI(14)", isOn: $showRsi).toggleStyle(.button).font(.caption2.monospaced())
-
-                    Divider().frame(height: 16)
-
-                    Button(showCandles ? engine.t("Candles", "K线") : engine.t("Line", "折线")) {
-                        showCandles.toggle()
+            HStack(spacing: 6) {
+                if let sf = engine.shortFrame, sf.active {
+                    let coin = (sf.coin ?? "BTC").uppercased()
+                    Picker("", selection: $shortMode) {
+                        Text(engine.t("Both", "双图")).tag(ShortChartMode.both)
+                        Text(engine.t("Overlay", "叠加")).tag(ShortChartMode.overlay)
+                        Text(engine.zh ? "\(coin) 币价" : coin).tag(ShortChartMode.spot)
+                        Text(engine.t("Shares", "份额")).tag(ShortChartMode.shares)
                     }
-                    .font(.caption2.bold())
-                    .buttonStyle(.bordered)
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 280)
+                }
 
-                    ForEach(intervals, id: \.self) { iv in
-                        Button(iv.uppercased()) {
-                            engine.loadHistory(interval: iv)
+                if !isShortCrypto || (shortMode != .spot && shortMode != .overlay) {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 5) {
+                            Toggle("EMA9", isOn: $showEma).toggleStyle(.button).font(.caption2.monospaced())
+                            Toggle("SMA20", isOn: $showSma).toggleStyle(.button).font(.caption2.monospaced())
+                            Toggle("BB(20,2)", isOn: $showBB).toggleStyle(.button).font(.caption2.monospaced())
+                            Toggle("VWAP", isOn: $showVwap).toggleStyle(.button).font(.caption2.monospaced())
+                            Toggle("RSI(14)", isOn: $showRsi).toggleStyle(.button).font(.caption2.monospaced())
+
+                            Divider().frame(height: 16)
+
+                            Button(showCandles ? engine.t("Candles", "K线") : engine.t("Line", "折线")) {
+                                showCandles.toggle()
+                            }
+                            .font(.caption2.bold())
+                            .buttonStyle(.bordered)
+
+                            ForEach(intervals, id: \.self) { iv in
+                                Button(iv.uppercased()) {
+                                    engine.loadHistory(interval: iv)
+                                }
+                                .font(.caption2.monospaced())
+                                .padding(.horizontal, 6).padding(.vertical, 4)
+                                .background(engine.chartInterval == iv ? Color.blue.opacity(0.22) : (scheme == .light ? Color.black.opacity(0.05) : Color.white.opacity(0.05)))
+                                .cornerRadius(5)
+                            }
                         }
-                        .font(.caption2.monospaced())
-                        .padding(.horizontal, 6).padding(.vertical, 4)
-                        .background(engine.chartInterval == iv ? Color.blue.opacity(0.22) : (scheme == .light ? Color.black.opacity(0.05) : Color.white.opacity(0.05)))
-                        .cornerRadius(5)
+                    }
+                } else {
+                    Spacer()
+                }
+            }
+
+            if let sf = engine.shortFrame, sf.active {
+                GeometryReader { geo in
+                    switch shortMode {
+                    case .both:
+                        let gap: CGFloat = 6
+                        let shareH = max(84, floor((geo.size.height - gap) * 0.34))
+                        let oracleH = max(120, geo.size.height - gap - shareH)
+                        VStack(spacing: gap) {
+                            oracleChartView(frame: sf, showShareOverlay: false)
+                                .frame(height: oracleH)
+                            shareChartView(compactBadge: "\(engine.t("SHARES", "份额")) · \(activeOutcomeTag())")
+                                .frame(height: shareH)
+                        }
+                    case .overlay:
+                        oracleChartView(frame: sf, showShareOverlay: true)
+                    case .spot:
+                        oracleChartView(frame: sf, showShareOverlay: false)
+                    case .shares:
+                        shareChartView(compactBadge: nil)
+                    }
+                }
+            } else {
+                shareChartView(compactBadge: nil)
+            }
+        }
+    }
+
+    private func activeOutcomeTag() -> String {
+        guard let m = engine.activeMarket else { return "" }
+        let name = m.displayOutcome(engine.activeOutcomeIdx, zh: engine.zh)
+        let staticPx = engine.activeOutcomeIdx < m.outcome_prices.count ? m.outcome_prices[engine.activeOutcomeIdx] : nil
+        let px = engine.book?.mid ?? staticPx
+        return "\(name) \(engine.oddsFmt.format(px, tick: m.tick_size))"
+    }
+
+    @ViewBuilder
+    private func oracleChartView(frame: ShortFrame, showShareOverlay: Bool) -> some View {
+        ZStack(alignment: .topLeading) {
+            Canvas { ctx, size in
+                let bg = Path(CGRect(origin: .zero, size: size))
+                ctx.fill(bg, with: .color(PolyTheme.cardBg(scheme)))
+
+                let pts = engine.oracleHistory
+                let beat = frame.beat
+                let spot = frame.spot ?? pts.last?.p
+                guard let curSpot = spot else { return }
+
+                let stale = frame.stale ?? false
+                let up = beat.map { curSpot >= $0 } ?? true
+                let lineCol: Color = stale ? PolyTheme.textMuted(scheme) : (up ? PolyTheme.emerald(scheme) : PolyTheme.crimson(scheme))
+
+                var minP = pts.map(\.p).min() ?? curSpot
+                var maxP = pts.map(\.p).max() ?? curSpot
+                if let b = beat {
+                    minP = min(minP, b)
+                    maxP = max(maxP, b)
+                }
+                let pad = max(abs(maxP) * 0.0004, (maxP - minP) * 0.2)
+                minP -= pad
+                maxP += pad
+                let rng = max(0.0001, maxP - minP)
+
+                let padL: CGFloat = showShareOverlay ? 46 : 8
+                let padR: CGFloat = 76
+                let plotW = max(12, size.width - padL - padR)
+                let plotH = max(12, size.height - 26)
+                func yOf(_ p: Double) -> CGFloat { 14 + CGFloat((maxP - p) / rng) * plotH }
+
+                let gridCol = PolyTheme.border(scheme).opacity(0.65)
+                for i in 0...2 {
+                    let frac = CGFloat(i) / 2.0
+                    let y = 14 + frac * plotH
+                    var gp = Path()
+                    gp.move(to: CGPoint(x: padL, y: y))
+                    gp.addLine(to: CGPoint(x: padL + plotW, y: y))
+                    ctx.stroke(gp, with: .color(gridCol), lineWidth: 0.7)
+                    let pVal = maxP - Double(frac) * rng
+                    ctx.draw(
+                        Text(EngineBridge.formatOracleUsd(pVal)).font(.system(size: 9, design: .monospaced)).foregroundColor(PolyTheme.textMuted(scheme)),
+                        at: CGPoint(x: padL + plotW + 4, y: y),
+                        anchor: .leading
+                    )
+                }
+
+                // Price to Beat dashed amber line
+                if let b = beat {
+                    let by = min(14 + plotH - 2, max(16, yOf(b)))
+                    var bp = Path()
+                    bp.move(to: CGPoint(x: padL, y: by))
+                    bp.addLine(to: CGPoint(x: padL + plotW, y: by))
+                    ctx.stroke(bp, with: .color(PolyTheme.amber(scheme)), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+
+                    let pill = CGRect(x: padL + plotW + 4, y: min(size.height - 18, max(2, by - 9)), width: padR - 8, height: 17)
+                    ctx.fill(Path(roundedRect: pill, cornerRadius: 4), with: .color(PolyTheme.amber(scheme)))
+                    ctx.draw(
+                        Text("BEAT").font(.system(size: 8.5, weight: .bold, design: .monospaced)).foregroundColor(.black),
+                        at: CGPoint(x: pill.midX, y: pill.midY),
+                        anchor: .center
+                    )
+                }
+
+                // Spot line
+                let minT = pts.first?.t ?? 0
+                let maxT = max(minT + 1, pts.last?.t ?? (minT + 1))
+                let spanT = Double(maxT - minT)
+                if pts.count >= 2 {
+                    func xOf(_ i: Int) -> CGFloat {
+                        padL + CGFloat(Double(pts[i].t - minT) / spanT) * plotW
+                    }
+                    var lineP = Path()
+                    var areaP = Path()
+                    for (i, pt) in pts.enumerated() {
+                        let p = CGPoint(x: xOf(i), y: yOf(pt.p))
+                        if i == 0 {
+                            lineP.move(to: p)
+                            areaP.move(to: CGPoint(x: p.x, y: 14 + plotH))
+                            areaP.addLine(to: p)
+                        } else {
+                            lineP.addLine(to: p)
+                            areaP.addLine(to: p)
+                        }
+                    }
+                    let lastPt = CGPoint(x: xOf(pts.count - 1), y: yOf(pts.last!.p))
+                    areaP.addLine(to: CGPoint(x: lastPt.x, y: 14 + plotH))
+                    areaP.closeSubpath()
+                    ctx.fill(areaP, with: .linearGradient(Gradient(colors: [lineCol.opacity(0.22), lineCol.opacity(0)]), startPoint: CGPoint(x: 0, y: 14), endPoint: CGPoint(x: 0, y: 14 + plotH)))
+                    ctx.stroke(lineP, with: .color(lineCol), lineWidth: 2)
+                    let dot = CGRect(x: lastPt.x - 3.5, y: lastPt.y - 3.5, width: 7, height: 7)
+                    ctx.fill(Path(ellipseIn: dot), with: .color(lineCol))
+                } else {
+                    let sy = yOf(curSpot)
+                    var sp = Path()
+                    sp.move(to: CGPoint(x: padL, y: sy))
+                    sp.addLine(to: CGPoint(x: padL + plotW, y: sy))
+                    ctx.stroke(sp, with: .color(lineCol.opacity(0.7)), lineWidth: 1.5)
+                    let dot = CGRect(x: padL + plotW - 4, y: sy - 4, width: 8, height: 8)
+                    ctx.fill(Path(ellipseIn: dot), with: .color(lineCol))
+                }
+
+                // Synced dual-axis Share Price overlay
+                if showShareOverlay, let m = engine.activeMarket {
+                    let staticPx = engine.activeOutcomeIdx < m.outcome_prices.count ? m.outcome_prices[engine.activeOutcomeIdx] : nil
+                    if let curSh = engine.book?.mid ?? staticPx {
+                        var merged: [(t: Int64, p: Double)] = []
+                        let liveFirstT = engine.shareLiveHistory.first?.t ?? Int64.max
+                        for pt in engine.history {
+                            let ms = pt.t * 1000
+                            if ms < liveFirstT { merged.append((ms, pt.p)) }
+                        }
+                        for pt in engine.shareLiveHistory { merged.append((pt.t, pt.p)) }
+
+                        var sMin = curSh, sMax = curSh
+                        var seed: Double?
+                        var win: [(t: Int64, p: Double)] = []
+                        for it in merged {
+                            if it.t <= minT { seed = it.p }
+                            else if it.t <= maxT {
+                                sMin = min(sMin, it.p); sMax = max(sMax, it.p); win.append(it)
+                            }
+                        }
+                        if let s0 = seed { sMin = min(sMin, s0); sMax = max(sMax, s0) }
+                        let sPad = max(0.03, (sMax - sMin) * 0.18)
+                        let lo = max(0.001, sMin - sPad)
+                        let hi = min(0.999, sMax + sPad)
+                        let sRng = max(0.01, hi - lo)
+                        func ySh(_ p: Double) -> CGFloat { 14 + CGFloat((hi - p) / sRng) * plotH }
+
+                        for i in 0...2 {
+                            let frac = CGFloat(i) / 2.0
+                            let y = 14 + frac * plotH
+                            let pVal = hi - Double(frac) * sRng
+                            ctx.draw(
+                                Text(engine.oddsFmt.format(pVal, tick: m.tick_size)).font(.system(size: 9, design: .monospaced)).foregroundColor(.cyan.opacity(0.85)),
+                                at: CGPoint(x: padL - 4, y: y),
+                                anchor: .trailing
+                            )
+                        }
+
+                        var shP = Path()
+                        if let s0 = seed {
+                            shP.move(to: CGPoint(x: padL, y: ySh(s0)))
+                        }
+                        for it in win {
+                            let pt = CGPoint(x: padL + CGFloat(Double(it.t - minT) / spanT) * plotW, y: ySh(it.p))
+                            if shP.isEmpty { shP.move(to: pt) } else { shP.addLine(to: pt) }
+                        }
+                        let endPt = CGPoint(x: padL + plotW, y: ySh(curSh))
+                        if shP.isEmpty { shP.move(to: CGPoint(x: padL, y: endPt.y)) }
+                        shP.addLine(to: endPt)
+                        ctx.stroke(shP, with: .color(.cyan), lineWidth: 1.8)
+                        let sDot = CGRect(x: endPt.x - 3.5, y: endPt.y - 3.5, width: 7, height: 7)
+                        ctx.fill(Path(ellipseIn: sDot), with: .color(.cyan))
                     }
                 }
             }
 
+            HStack(spacing: 8) {
+                Text("\((frame.coin ?? "BTC").uppercased()) \(frame.spot.map { EngineBridge.formatOracleUsd($0) } ?? "—")")
+                    .font(.caption2.monospacedDigit().bold())
+                    .foregroundColor(frame.stale == true ? PolyTheme.textMuted(scheme) : ((frame.beat.map { (frame.spot ?? 0) >= $0 } ?? true) ? PolyTheme.emerald(scheme) : PolyTheme.crimson(scheme)))
+                if showShareOverlay {
+                    Text(activeOutcomeTag())
+                        .font(.caption2.monospacedDigit().bold())
+                        .foregroundColor(.cyan)
+                }
+                if let b = frame.beat {
+                    Text("\(engine.t("BEAT", "基准")) \(EngineBridge.formatOracleUsd(b))")
+                        .font(.caption2.monospacedDigit().bold())
+                        .foregroundColor(PolyTheme.amber(scheme))
+                }
+            }
+            .padding(.horizontal, showShareOverlay ? 50 : 8)
+            .padding(.vertical, 4)
+        }
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(PolyTheme.border(scheme), lineWidth: 1))
+        .cornerRadius(10)
+        .transaction { $0.animation = nil }
+    }
+
+    @ViewBuilder
+    private func shareChartView(compactBadge: String?) -> some View {
+        ZStack(alignment: .topLeading) {
             Canvas { ctx, size in
                 let bg = Path(CGRect(origin: .zero, size: size))
-                let bgCol = scheme == .light ? Color.white : Color(red: 24.0 / 255.0, green: 26.0 / 255.0, blue: 31.0 / 255.0)
+                let bgCol = PolyTheme.cardBg(scheme)
                 ctx.fill(bg, with: .color(bgCol))
 
                 let pts = engine.history
@@ -52,7 +304,7 @@ struct ChartView: View {
                 let prices = pts.map(\.p)
 
                 let padR: CGFloat = 50
-                let rsiH: CGFloat = (showRsi && size.height > 170) ? 46 : 0
+                let rsiH: CGFloat = (compactBadge == nil && showRsi && size.height > 170) ? 46 : 0
                 let plotW = max(10, size.width - padR - 10)
                 let plotH = max(10, size.height - 20 - rsiH - (rsiH > 0 ? 6 : 0))
 
@@ -97,7 +349,9 @@ struct ChartView: View {
 
                 // Price curve or Candles
                 let up = (prices.last ?? 0) >= (prices.first ?? 0)
-                let lineCol: Color = up ? .green : .red
+                let upCol = PolyTheme.emerald(scheme)
+                let dnCol = PolyTheme.crimson(scheme)
+                let lineCol: Color = up ? upCol : dnCol
                 if showCandles {
                     let spanT = max(60, (pts.last?.t ?? 0) - (pts.first?.t ?? 0))
                     let bucket = max(15, spanT / 40)
@@ -116,7 +370,7 @@ struct ChartView: View {
                     let barW = min(12, max(3, (plotW / CGFloat(n)) * 0.65))
                     for (i, b) in buckets.enumerated() {
                         let cx = 6 + (CGFloat(i) + 0.5) / CGFloat(n) * plotW
-                        let col: Color = b.c >= b.o ? .green : .red
+                        let col: Color = b.c >= b.o ? upCol : dnCol
                         var wick = Path()
                         wick.move(to: CGPoint(x: cx, y: yOf(b.h)))
                         wick.addLine(to: CGPoint(x: cx, y: yOf(b.l)))
@@ -236,9 +490,20 @@ struct ChartView: View {
                     ctx.stroke(rp, with: .color(.orange), lineWidth: 1.3)
                 }
             }
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(scheme == .light ? Color.black.opacity(0.10) : Color.white.opacity(0.08), lineWidth: 1))
-            .cornerRadius(10)
-            .transaction { $0.animation = nil }
+
+            if let badge = compactBadge {
+                Text(badge)
+                    .font(.caption2.monospacedDigit().bold())
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(PolyTheme.subBg(scheme).opacity(0.9))
+                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(PolyTheme.border(scheme), lineWidth: 1))
+                    .cornerRadius(4)
+                    .padding(6)
+            }
         }
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(PolyTheme.border(scheme), lineWidth: 1))
+        .cornerRadius(10)
+        .transaction { $0.animation = nil }
     }
 }

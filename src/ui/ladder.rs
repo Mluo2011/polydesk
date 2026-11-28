@@ -69,13 +69,14 @@ pub fn draw_price_ladder(
 ) -> Option<LadderAction> {
     let step = state.step.max(0.001);
     let avail = ui.available_size();
-    let row_h = 24.0_f32;
+    let imb_h = 20.0_f32;
+    let row_h = 25.0_f32;
     let hdr_h = 24.0_f32;
-    let visible_rows = (((avail.y - hdr_h - 4.0) / row_h).floor() as usize).clamp(9, 41);
+    let visible_rows = (((avail.y - imb_h - hdr_h - 4.0) / row_h).floor() as usize).clamp(9, 41);
     let visible_rows = if visible_rows % 2 == 0 { visible_rows - 1 } else { visible_rows };
     let half = (visible_rows / 2) as isize;
 
-    let total_h = hdr_h + (visible_rows as f32) * row_h;
+    let total_h = imb_h + hdr_h + (visible_rows as f32) * row_h;
     let sense = if interact_enabled {
         Sense::click_and_drag()
     } else {
@@ -106,10 +107,10 @@ pub fn draw_price_ladder(
     }
 
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, CornerRadius::same(6), pal.bg_card);
+    painter.rect_filled(rect, CornerRadius::same(10), pal.bg_card);
     painter.rect_stroke(
         rect,
-        CornerRadius::same(6),
+        CornerRadius::same(10),
         Stroke::new(1.0, pal.border),
         egui::StrokeKind::Inside,
     );
@@ -129,15 +130,16 @@ pub fn draw_price_ladder(
     let x5 = x4 + c_my;
     let x6 = rect.right();
 
-    // Header
-    let hdr_rect = Rect::from_min_max(pos2(x0 + 1.0, rect.top() + 1.0), pos2(x6 - 1.0, rect.top() + hdr_h));
-    painter.rect_filled(
-        hdr_rect,
-        CornerRadius { nw: 5, ne: 5, sw: 0, se: 0 },
-        pal.ladder_hdr_bg,
+    // Header (sits beneath the 20px Bid/Ask pressure bar)
+    let hdr_top = rect.top() + imb_h;
+    let hdr_rect = Rect::from_min_max(pos2(x0 + 1.0, hdr_top), pos2(x6 - 1.0, hdr_top + hdr_h));
+    painter.rect_filled(hdr_rect, CornerRadius::ZERO, pal.ladder_hdr_bg);
+    painter.line_segment(
+        [pos2(x0 + 1.0, hdr_top), pos2(x6 - 1.0, hdr_top)],
+        Stroke::new(1.0, pal.border),
     );
     painter.line_segment(
-        [pos2(x0 + 1.0, rect.top() + hdr_h), pos2(x6 - 1.0, rect.top() + hdr_h)],
+        [pos2(x0 + 1.0, hdr_top + hdr_h), pos2(x6 - 1.0, hdr_top + hdr_h)],
         Stroke::new(1.0, pal.border),
     );
     let hdr_col = pal.text_muted;
@@ -153,16 +155,56 @@ pub fn draw_price_ladder(
     // Aggregate book & orders
     let mut bid_map: HashMap<isize, f64> = HashMap::new();
     let mut ask_map: HashMap<isize, f64> = HashMap::new();
+    let mut tot_bids = 0.0_f64;
+    let mut tot_asks = 0.0_f64;
     if let Some(b) = book {
         for &(p, s) in &b.bids {
             let k = (p / step + 1e-9).floor() as isize;
             *bid_map.entry(k).or_insert(0.0) += s;
+            tot_bids += s;
         }
         for &(p, s) in &b.asks {
             let k = (p / step - 1e-9).ceil() as isize;
             *ask_map.entry(k).or_insert(0.0) += s;
+            tot_asks += s;
         }
     }
+
+    // Bid / Ask pressure bar at top of ladder
+    let imb_rect = Rect::from_min_max(pos2(x0 + 1.0, rect.top() + 1.0), pos2(x6 - 1.0, hdr_top));
+    painter.rect_filled(imb_rect, CornerRadius { nw: 7, ne: 7, sw: 0, se: 0 }, pal.bg_sub);
+    let bid_share = if tot_bids + tot_asks > 1e-6 {
+        (tot_bids / (tot_bids + tot_asks)) as f32
+    } else {
+        book.map(|b| (b.imbalance * 0.5 + 0.5).clamp(0.05, 0.95) as f32)
+            .unwrap_or(0.5)
+    };
+    let bid_pct = (bid_share * 100.0).round() as i32;
+    let ask_pct = 100 - bid_pct;
+    let bar_track = Rect::from_min_max(pos2(x0 + 78.0, imb_rect.center().y - 2.5), pos2(x6 - 78.0, imb_rect.center().y + 2.5));
+    if bar_track.width() > 24.0 {
+        let split_x = bar_track.left() + bar_track.width() * bid_share.clamp(0.04, 0.96);
+        painter.rect_filled(bar_track, CornerRadius::same(2), ThemePalette::tint(pal.red, 95));
+        painter.rect_filled(
+            Rect::from_min_max(bar_track.left_top(), pos2(split_x, bar_track.bottom())),
+            CornerRadius::same(2),
+            pal.green,
+        );
+    }
+    painter.text(
+        pos2(x0 + 10.0, imb_rect.center().y),
+        Align2::LEFT_CENTER,
+        format!("{} {}%", tr(lang, "BID", "买盘"), bid_pct),
+        FontId::monospace(9.5),
+        pal.green_text,
+    );
+    painter.text(
+        pos2(x6 - 10.0, imb_rect.center().y),
+        Align2::RIGHT_CENTER,
+        format!("{}% {}", ask_pct, tr(lang, "ASK", "卖盘")),
+        FontId::monospace(9.5),
+        pal.red_text,
+    );
 
     let mut my_bids: HashMap<isize, f64> = HashMap::new();
     let mut my_asks: HashMap<isize, f64> = HashMap::new();
@@ -227,7 +269,7 @@ pub fn draw_price_ladder(
         let p = ((k as f64) * step * 10_000.0).round() / 10_000.0;
         let valid = (0.001..=0.999).contains(&p);
 
-        let y_top = rect.top() + hdr_h + (i as f32) * row_h;
+        let y_top = hdr_top + hdr_h + (i as f32) * row_h;
         let y_bot = y_top + row_h;
         let y_mid = (y_top + y_bot) * 0.5;
         let row_rect = Rect::from_min_max(pos2(x0 + 1.0, y_top), pos2(x6 - 1.0, y_bot));
@@ -275,8 +317,8 @@ pub fn draw_price_ladder(
         if let Some(&bsz) = bid_map.get(&k) && bsz > 0.0 {
             let bw = ((bsz / max_depth).min(1.0) as f32) * (r_bid.width() - 4.0);
             painter.rect_filled(
-                Rect::from_min_max(pos2(r_bid.right() - bw - 2.0, y_top + 3.0), pos2(r_bid.right() - 2.0, y_bot - 3.0)),
-                2.0,
+                Rect::from_min_max(pos2(r_bid.right() - bw - 2.0, y_top + 2.5), pos2(r_bid.right() - 2.0, y_bot - 2.5)),
+                3.0,
                 bid_bar,
             );
             painter.text(pos2(r_bid.right() - 6.0, y_mid), Align2::RIGHT_CENTER, format_size(bsz), mono.clone(), pal.green_text);
@@ -285,8 +327,8 @@ pub fn draw_price_ladder(
         if let Some(&asz) = ask_map.get(&k) && asz > 0.0 {
             let aw = ((asz / max_depth).min(1.0) as f32) * (r_ask.width() - 4.0);
             painter.rect_filled(
-                Rect::from_min_max(pos2(r_ask.left() + 2.0, y_top + 3.0), pos2(r_ask.left() + aw + 2.0, y_bot - 3.0)),
-                2.0,
+                Rect::from_min_max(pos2(r_ask.left() + 2.0, y_top + 2.5), pos2(r_ask.left() + aw + 2.0, y_bot - 2.5)),
+                3.0,
                 ask_bar,
             );
             painter.text(pos2(r_ask.left() + 6.0, y_mid), Align2::LEFT_CENTER, format_size(asz), mono.clone(), pal.red_text);

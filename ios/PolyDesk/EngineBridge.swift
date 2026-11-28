@@ -254,6 +254,8 @@ final class EngineBridge: ObservableObject {
 
     // v0.3.1 iOS parity
     @Published var shortFrame: ShortFrame?
+    @Published var oracleHistory: [OraclePt] = []
+    @Published var shareLiveHistory: [OraclePt] = []
     @Published var gridMarkets: [GridEntry] = []
     @Published var alerts: [AlertItem] = []
     @Published var ctfBusy: Bool = false
@@ -269,6 +271,7 @@ final class EngineBridge: ObservableObject {
     private var timer: Timer?
     private var oracleTimer: Timer?
     private var lastGridLoad: Date = .distantPast
+    private var oracleSymbol: String?
 
     init() {
         let dataPath = Self.prepareSecureDataDirectory()
@@ -375,10 +378,18 @@ final class EngineBridge: ObservableObject {
 
     static func formatOracleUsd(_ v: Double?) -> String {
         guard let v = v else { return "—" }
+        let sign = v < 0 ? "-" : ""
         let a = abs(v)
-        if a >= 100.0 { return String(format: "$%.2f", v) }
-        if a >= 1.0 { return String(format: "$%.3f", v) }
-        return String(format: "$%.4f", v)
+        if a >= 100.0 {
+            let nf = NumberFormatter()
+            nf.numberStyle = .decimal
+            nf.minimumFractionDigits = 2
+            nf.maximumFractionDigits = 2
+            let body = nf.string(from: NSNumber(value: a)) ?? String(format: "%.2f", a)
+            return "\(sign)$\(body)"
+        }
+        if a >= 1.0 { return "\(sign)\(String(format: "$%.3f", a))" }
+        return "\(sign)\(String(format: "$%.4f", a))"
     }
 
     var activeAssetId: String? {
@@ -517,6 +528,7 @@ final class EngineBridge: ObservableObject {
         ladderStep = max(0.001, m.tick_size)
         book = nil
         history = []
+        shareLiveHistory = []
         call(["op": "subscribe", "asset_ids": m.token_ids], as: [String: Int].self) { _ in }
         loadHistory(interval: chartInterval)
         call(["op": "whales", "condition_id": m.condition_id], as: WhaleSummary.self) { [weak self] res in
@@ -714,6 +726,8 @@ final class EngineBridge: ObservableObject {
     func pollShortFrame() {
         guard let m = activeMarket else {
             if shortFrame != nil { shortFrame = nil }
+            if !oracleHistory.isEmpty { oracleHistory = [] }
+            oracleSymbol = nil
             return
         }
         let req: [String: Any] = [
@@ -729,6 +743,40 @@ final class EngineBridge: ObservableObject {
             switch res {
             case .success(let f):
                 self.shortFrame = f.active ? f : nil
+                if f.active {
+                    if self.oracleSymbol != f.symbol {
+                        self.oracleSymbol = f.symbol
+                        self.oracleHistory = []
+                        self.shareLiveHistory = []
+                    }
+                    let rawMs = Int64(Date().timeIntervalSince1970 * 1000)
+                    // Never synthesize a sample for a stale oracle feed: the last
+                    // Chainlink price would otherwise be re-appended every poll with a
+                    // fresh timestamp, drawing a flat line that looks live. Desktop
+                    // dims the series on `stale` (chart.rs); this is the iOS equivalent.
+                    let isStale = f.stale == true
+                    if !isStale, let spot = f.spot,
+                       rawMs > (self.oracleHistory.last?.id ?? Int64.min) {
+                        self.oracleHistory.append(OraclePt(id: rawMs, t: rawMs, p: spot))
+                        if self.oracleHistory.count > 300 {
+                            self.oracleHistory.removeFirst(self.oracleHistory.count - 300)
+                        }
+                    }
+                    let staticPx = (self.activeMarket?.outcome_prices.indices.contains(self.activeOutcomeIdx) == true)
+                        ? self.activeMarket?.outcome_prices[self.activeOutcomeIdx]
+                        : nil
+                    if let shPx = self.book?.mid ?? staticPx,
+                       rawMs > (self.shareLiveHistory.last?.id ?? Int64.min) {
+                        self.shareLiveHistory.append(OraclePt(id: rawMs, t: rawMs, p: shPx))
+                        if self.shareLiveHistory.count > 300 {
+                            self.shareLiveHistory.removeFirst(self.shareLiveHistory.count - 300)
+                        }
+                    }
+                } else {
+                    self.oracleSymbol = nil
+                    if !self.oracleHistory.isEmpty { self.oracleHistory = [] }
+                    if !self.shareLiveHistory.isEmpty { self.shareLiveHistory = [] }
+                }
                 // Keep the 4-up pool fresh so "Next Round" always has the live slot.
                 if f.active, let secs = f.secs_left, secs <= 2,
                    Date().timeIntervalSince(self.lastGridLoad) > 15 {
@@ -736,6 +784,8 @@ final class EngineBridge: ObservableObject {
                 }
             case .failure:
                 self.shortFrame = nil
+                self.oracleSymbol = nil
+                if !self.oracleHistory.isEmpty { self.oracleHistory = [] }
             }
         }
     }
@@ -899,6 +949,12 @@ struct ShortFrame: Codable {
     let twap_60s: Double?
     let binance_mid: Double?
     let stale: Bool?
+}
+
+struct OraclePt: Identifiable {
+    let id: Int64
+    let t: Int64
+    let p: Double
 }
 
 struct GridEntry: Codable, Identifiable {

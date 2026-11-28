@@ -281,6 +281,29 @@ impl FastOrderBook {
         }
     }
 
+    /// O(1) top-of-book projection without allocating full ladder arrays.
+    /// Used on the high-frequency WS event broadcast path so downstream
+    /// BBO/mid/last-trade listeners do not allocate and scan every tick level
+    /// on each `price_change` delta.
+    pub fn to_top_view(&self) -> BookView {
+        BookView {
+            asset_id: self.asset_id.clone(),
+            market_id: self.market_id.clone(),
+            tick_size: tick_to_price(self.tick_size_ticks),
+            best_bid: self.best_bid(),
+            best_ask: self.best_ask(),
+            mid: self.mid(),
+            spread: self.spread(),
+            imbalance: 0.0,
+            last_trade_price: self.last_trade_price,
+            last_trade_side: self.last_trade_side.clone(),
+            timestamp_ms: self.last_timestamp_ms,
+            sequence: self.sequence,
+            bids: Vec::new(),
+            asks: Vec::new(),
+        }
+    }
+
     /// Simulate sweeping resting liquidity across multiple price levels.
     /// `is_buy = true` sweeps asks upward; `is_buy = false` sweeps bids downward.
     pub fn simulate_sweep(
@@ -499,5 +522,27 @@ mod tests {
         // Hedge NO @ 0.18 => 100 * (1 - 0.40 - 0.18) = $42 > $40 -> recommends hedge_opposite!
         assert!((g.hedge_no_locked_pnl.unwrap() - 42.0).abs() < 1e-6);
         assert_eq!(g.recommended_action, "hedge_opposite");
+    }
+
+    #[test]
+    fn to_top_view_matches_to_view_top_of_book() {
+        let mut book = FastOrderBook::new("1".into(), "0xabc".into(), 0.01);
+        book.apply_snapshot(
+            &[(0.48, 100.0), (0.47, 200.0)],
+            &[(0.50, 50.0), (0.52, 100.0)],
+            1234,
+            Some("h2".into()),
+        );
+        let full = book.to_view(20);
+        let top = book.to_top_view();
+        assert_eq!(top.asset_id, full.asset_id);
+        assert_eq!(top.market_id, full.market_id);
+        assert_eq!(top.best_bid, full.best_bid);
+        assert_eq!(top.best_ask, full.best_ask);
+        assert_eq!(top.mid, full.mid);
+        assert_eq!(top.spread, full.spread);
+        assert_eq!(top.timestamp_ms, full.timestamp_ms);
+        assert!(top.bids.is_empty());
+        assert!(top.asks.is_empty());
     }
 }

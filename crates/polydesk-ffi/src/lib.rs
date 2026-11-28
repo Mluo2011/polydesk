@@ -143,6 +143,19 @@ enum FfiRequest {
     },
     RemoveAlert { id: String },
     Ctf { req: CtfRequest },
+
+    // ---- v0.3.2: GitHub Hot + Cold update status & live hot-patch application ----
+    CheckUpdates,
+    /// Two-phase application so SwiftUI can show a host diff first.
+    ///   phase 1: `{}` (or `{"confirmed":false}`) -> returns the manifest for review
+    ///   phase 2: `{"patch_id":"…","confirmed":true}` -> applies that exact patch
+    ApplyHotUpdate {
+        #[serde(default)]
+        patch_id: Option<String>,
+        #[serde(default)]
+        confirmed: bool,
+    },
+    HotPatchStatus,
 }
 
 #[unsafe(no_mangle)]
@@ -469,6 +482,80 @@ fn handle_call(raw: *const c_char) -> Result<Value, String> {
                     c.execution.execute_ctf(req).await.map_err(|e| e.to_string())?;
                 Ok(json!(res))
             }
+            FfiRequest::CheckUpdates => {
+                let repo = c.config.read().github_repo.clone();
+                let (applied_rev, applied_id) = match c.current_hot_patch() {
+                    Some(p) => (p.revision, Some(p.patch_id)),
+                    None => (0, None),
+                };
+                let status = polydesk::updater::check_github_updates(
+                    c.market_client.http(),
+                    &repo,
+                    applied_rev,
+                    applied_id.as_deref(),
+                )
+                .await;
+                Ok(json!({
+                    "status": status,
+                    "platform_can_self_replace": false,
+                }))
+            }
+            FfiRequest::ApplyHotUpdate { patch_id, confirmed } => {
+                let repo = c.config.read().github_repo.clone();
+                let (applied_rev, applied_id) = match c.current_hot_patch() {
+                    Some(p) => (p.revision, Some(p.patch_id)),
+                    None => (0, None),
+                };
+                let status = polydesk::updater::check_github_updates(
+                    c.market_client.http(),
+                    &repo,
+                    applied_rev,
+                    applied_id.as_deref(),
+                )
+                .await;
+                if let Some(err) = status.error {
+                    return Err(err);
+                }
+
+                // Consent gate: a hot patch can re-point API endpoints, so it is never
+                // applied on a bare call. The caller must first receive the manifest,
+                // review it, then echo back its exact `patch_id` with `confirmed: true`.
+                if !confirmed {
+                    return Ok(json!({
+                        "applied": false,
+                        "status": "consent_required",
+                        "pending": status.verified_hot_patch,
+                        "hot_patch_error": status.hot_patch_error,
+                        "cold_update_available": status.cold_update_available,
+                        "latest_version": status.latest_version,
+                    }));
+                }
+
+                let Some(patch) = status.verified_hot_patch else {
+                    return Ok(json!({
+                        "applied": false,
+                        "status": "up_to_date",
+                        "cold_update_available": status.cold_update_available,
+                        "latest_version": status.latest_version,
+                    }));
+                };
+                let requested = patch_id.unwrap_or_default();
+                if requested != patch.patch_id {
+                    return Err(format!(
+                        "Confirmed patch_id {requested:?} does not match the offer {:?} — refusing",
+                        patch.patch_id
+                    ));
+                }
+                let summary = c.apply_hot_patch(patch).map_err(|e| e.to_string())?;
+                Ok(json!({
+                    "applied": true,
+                    "summary": summary,
+                }))
+            }
+            FfiRequest::HotPatchStatus => Ok(json!({
+                "app_version": polydesk::config::APP_VERSION,
+                "hot_patch": c.current_hot_patch(),
+            })),
         }
     })
 }
@@ -542,6 +629,8 @@ fn short_frame_json(
         "spot": snap.as_ref().map(|s| s.spot),
         "twap_60s": snap.as_ref().map(|s| s.twap_60s),
         "binance_mid": snap.as_ref().and_then(|s| s.binance_mid),
+        "fast_spot": snap.as_ref().and_then(|s| s.fast_spot),
+        "fast_wire_lag_ms": snap.as_ref().and_then(|s| s.fast_wire_lag_ms),
         "stale": snap.as_ref().map(|s| s.stale).unwrap_or(true),
     })
 }

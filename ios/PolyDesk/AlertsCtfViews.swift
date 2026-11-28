@@ -74,6 +74,7 @@ struct AlertsPaneView: View {
 
 struct CtfPaneView: View {
     @ObservedObject var engine: EngineBridge
+    @Environment(\.colorScheme) private var scheme
     @State private var amountText: String = "10"
     @State private var pendingAction: String? = nil
 
@@ -160,13 +161,13 @@ struct CtfPaneView: View {
             if engine.ctfBusy {
                 Text(engine.t("Submitting transaction…", "正在提交交易…"))
                     .font(.caption2)
-                    .foregroundColor(.orange)
+                    .foregroundColor(PolyTheme.amber(scheme))
             }
             if let r = engine.lastCtf {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(r.summary)
                         .font(.caption2.monospacedDigit())
-                        .foregroundColor(.green)
+                        .foregroundColor(PolyTheme.emerald(scheme))
                     if let hash = r.tx_hash {
                         Text(hash)
                             .font(.caption2.monospaced())

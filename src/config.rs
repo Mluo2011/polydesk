@@ -46,7 +46,7 @@ fn default_odds_format() -> String {
     "cents".to_string()
 }
 
-fn default_stake_presets() -> Vec<f64> {
+pub fn default_stake_presets() -> Vec<f64> {
     vec![5.0, 10.0, 25.0, 50.0, 100.0]
 }
 
@@ -131,14 +131,14 @@ pub async fn verify_polygon_rpc_dns(clean_rpc: &str) -> Result<()> {
     verify_resolved_rpc_ips(host, &addrs)
 }
 
-pub fn validate_polygon_rpc_url(raw: &str) -> Result<String> {
+fn validate_public_url(raw: &str, expected_scheme: &str, label: &str) -> Result<String> {
     let trimmed = raw.trim();
-    let parsed = Url::parse(trimmed).context("Invalid Polygon RPC URL")?;
-    if parsed.scheme() != "https" {
-        return Err(anyhow!("Polygon RPC URL must use https://"));
+    let parsed = Url::parse(trimmed).with_context(|| format!("Invalid {label} URL"))?;
+    if parsed.scheme() != expected_scheme {
+        return Err(anyhow!("{label} URL must use {expected_scheme}://"));
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err(anyhow!("Polygon RPC URL must not embed credentials"));
+        return Err(anyhow!("{label} URL must not embed credentials"));
     }
     match parsed.host() {
         Some(Host::Domain(dom)) => {
@@ -149,7 +149,7 @@ pub fn validate_polygon_rpc_url(raw: &str) -> Result<String> {
                 || lower.ends_with(".local")
                 || lower.ends_with(".internal")
             {
-                return Err(anyhow!("Polygon RPC host '{lower}' is not permitted"));
+                return Err(anyhow!("{label} host '{lower}' is not permitted"));
             }
             if let Ok(ip) = lower.parse::<IpAddr>() {
                 let bad = match ip {
@@ -157,23 +157,35 @@ pub fn validate_polygon_rpc_url(raw: &str) -> Result<String> {
                     IpAddr::V6(v6) => is_disallowed_ipv6(v6),
                 };
                 if bad {
-                    return Err(anyhow!("Private/local Polygon RPC IP '{ip}' is not permitted"));
+                    return Err(anyhow!("Private/local {label} IP '{ip}' is not permitted"));
                 }
             }
         }
         Some(Host::Ipv4(ip)) => {
             if is_disallowed_ipv4(ip) {
-                return Err(anyhow!("Private/local Polygon RPC IP '{ip}' is not permitted"));
+                return Err(anyhow!("Private/local {label} IP '{ip}' is not permitted"));
             }
         }
         Some(Host::Ipv6(ip)) => {
             if is_disallowed_ipv6(ip) {
-                return Err(anyhow!("Private/local Polygon RPC IP '{ip}' is not permitted"));
+                return Err(anyhow!("Private/local {label} IP '{ip}' is not permitted"));
             }
         }
-        None => return Err(anyhow!("Polygon RPC URL must specify a valid host")),
+        None => return Err(anyhow!("{label} URL must specify a valid host")),
     }
     Ok(trimmed.to_string())
+}
+
+pub fn validate_public_https_url(raw: &str, label: &str) -> Result<String> {
+    validate_public_url(raw, "https", label)
+}
+
+pub fn validate_public_wss_url(raw: &str, label: &str) -> Result<String> {
+    validate_public_url(raw, "wss", label)
+}
+
+pub fn validate_polygon_rpc_url(raw: &str) -> Result<String> {
+    validate_public_https_url(raw, "Polygon RPC")
 }
 
 pub fn redact_rpc_url(raw: &str) -> String {
@@ -187,6 +199,38 @@ pub fn redact_rpc_url(raw: &str) -> String {
         },
         Err(_) => "https://<invalid-rpc>".to_string(),
     }
+}
+
+pub fn default_ui_repaint_ms() -> u64 {
+    8
+}
+
+pub fn default_live_tick_ms() -> u64 {
+    100
+}
+
+pub fn default_short_chart_bucket_secs() -> i64 {
+    1
+}
+
+pub fn default_slippage_warn_bps() -> f64 {
+    100.0
+}
+
+pub fn default_quick_buy_presets() -> Vec<f64> {
+    vec![1.0, 10.0, 50.0, 100.0]
+}
+
+pub fn default_short_chart_view() -> String {
+    "both".to_string()
+}
+
+pub fn default_short_chart_window_secs() -> i64 {
+    180
+}
+
+pub fn default_ui_zoom() -> f32 {
+    1.0
 }
 
 pub fn default_vault_profile() -> String {
@@ -250,8 +294,23 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub github_repo: String,
+    /// Set once the operator types a repo themselves. The legacy
+    /// `Mluo2011/polydesk` -> `Mluo2011/polydirect` rewrite is skipped afterwards so an
+    /// intentional fork choice is never silently overridden.
+    #[serde(default)]
+    pub github_repo_user_set: Option<bool>,
     #[serde(default = "default_true")]
     pub auto_check_updates: bool,
+    /// SECURITY: never default-on. A hot patch can re-point every REST/WS/RPC
+    /// endpoint, so it must always be an explicit, reviewable user action.
+    #[serde(default)]
+    pub auto_apply_hot_updates: bool,
+    /// Explicit user consent saved from Settings; distinguishes manual opt-in from
+    /// legacy configs that shipped with `auto_apply_hot_updates = true` before hardening.
+    #[serde(default)]
+    pub auto_apply_hot_updates_opt_in: Option<bool>,
+    #[serde(default = "default_true")]
+    pub auto_stage_cold_updates: bool,
 
     /// Polymarket CLOB V2 Builder Code (32-byte 0x-prefixed hex string).
     /// Configured via https://polymarket.com/settings?tab=builder so matched orders
@@ -279,6 +338,39 @@ pub struct AppConfig {
     pub price_alerts: Vec<crate::alerts::PriceAlert>,
     #[serde(default = "default_hotkeys")]
     pub hotkeys: HashMap<String, String>,
+
+    #[serde(default = "default_ui_repaint_ms")]
+    pub ui_repaint_ms: u64,
+    #[serde(default = "default_live_tick_ms")]
+    pub live_tick_ms: u64,
+    #[serde(default = "default_short_chart_bucket_secs")]
+    pub short_chart_bucket_secs: i64,
+    #[serde(default = "default_true")]
+    pub confirm_before_order: bool,
+    #[serde(default)]
+    pub confirm_on_high_slippage: bool,
+    #[serde(default = "default_true")]
+    pub confirm_ladder_orders: bool,
+    #[serde(default = "default_slippage_warn_bps")]
+    pub slippage_warn_bps: f64,
+    #[serde(default = "default_quick_buy_presets")]
+    pub quick_buy_presets: Vec<f64>,
+    #[serde(default = "default_short_chart_view")]
+    pub default_short_chart_view: String,
+    #[serde(default = "default_true")]
+    pub primary_btc_live_lead: bool,
+    #[serde(default = "default_short_chart_window_secs")]
+    pub short_chart_window_secs: i64,
+    #[serde(default = "default_true")]
+    pub show_oracle_fast_lead: bool,
+    #[serde(default = "default_true")]
+    pub show_oracle_cl_ref: bool,
+    #[serde(default = "default_true")]
+    pub show_oracle_twap: bool,
+    #[serde(default = "default_true")]
+    pub show_oracle_lag_badge: bool,
+    #[serde(default = "default_ui_zoom")]
+    pub ui_zoom: f32,
 }
 
 impl Default for AppConfig {
@@ -296,7 +388,12 @@ impl Default for AppConfig {
             whale_threshold_usd: default_whale_threshold(),
             paper_starting_balance: default_paper_balance(),
             github_repo: DEFAULT_GITHUB_REPO.to_string(),
+            github_repo_user_set: None,
             auto_check_updates: true,
+            auto_apply_hot_updates: false,
+            auto_apply_hot_updates_opt_in: None,
+            auto_stage_cold_updates: true,
+            // no user value
             builder_code: HARDCODED_BUILDER_CODE.to_string(),
             builder_taker_bps: default_builder_taker_bps(),
             builder_maker_bps: default_builder_maker_bps(),
@@ -308,6 +405,22 @@ impl Default for AppConfig {
             watchlist: Vec::new(),
             price_alerts: Vec::new(),
             hotkeys: default_hotkeys(),
+            ui_repaint_ms: default_ui_repaint_ms(),
+            live_tick_ms: default_live_tick_ms(),
+            short_chart_bucket_secs: default_short_chart_bucket_secs(),
+            confirm_before_order: true,
+            confirm_on_high_slippage: false,
+            confirm_ladder_orders: true,
+            slippage_warn_bps: default_slippage_warn_bps(),
+            quick_buy_presets: default_quick_buy_presets(),
+            default_short_chart_view: default_short_chart_view(),
+            primary_btc_live_lead: true,
+            short_chart_window_secs: default_short_chart_window_secs(),
+            show_oracle_fast_lead: true,
+            show_oracle_cl_ref: true,
+            show_oracle_twap: true,
+            show_oracle_lag_badge: true,
+            ui_zoom: default_ui_zoom(),
         }
     }
 }
@@ -501,6 +614,18 @@ impl AppConfig {
             .unwrap_or_else(|| Self::config_dir().join("config.toml"))
     }
 
+    pub fn resolved_config_dir(custom: Option<&std::path::Path>) -> PathBuf {
+        custom
+            .and_then(|p| p.parent())
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(Self::config_dir)
+    }
+
+    pub fn hot_patch_path(custom: Option<&std::path::Path>) -> PathBuf {
+        Self::resolved_config_dir(custom).join("hot_patch.json")
+    }
+
     pub fn load(custom: Option<&PathBuf>) -> Result<Self> {
         let path = Self::config_path(custom);
         if !path.exists() {
@@ -530,6 +655,11 @@ impl AppConfig {
     }
 
     pub fn sanitize(&mut self) {
+        // Force legacy `auto_apply_hot_updates = true` off unless explicitly opted in
+        // from Settings (`auto_apply_hot_updates_opt_in = Some(true)`).
+        if self.auto_apply_hot_updates && self.auto_apply_hot_updates_opt_in != Some(true) {
+            self.auto_apply_hot_updates = false;
+        }
         // Hardcode Builder Code & label — cannot be altered via config.toml or UI
         self.builder_code = HARDCODED_BUILDER_CODE.to_string();
         self.builder_label = HARDCODED_BUILDER_LABEL.to_string();
@@ -562,7 +692,18 @@ impl AppConfig {
         if self.theme != "light" {
             self.theme = "dark".to_string();
         }
-        if self.github_repo.is_empty() && !DEFAULT_GITHUB_REPO.is_empty() {
+        if (self.github_repo.is_empty()
+            || (self.github_repo.eq_ignore_ascii_case("Mluo2011/polydesk")
+                && self.github_repo_user_set != Some(true)))
+            && !DEFAULT_GITHUB_REPO.is_empty()
+        {
+            if self.github_repo.eq_ignore_ascii_case("Mluo2011/polydesk") {
+                tracing::info!(
+                    from = %self.github_repo,
+                    to = %DEFAULT_GITHUB_REPO,
+                    "Migrating legacy GitHub repo setting"
+                );
+            }
             self.github_repo = DEFAULT_GITHUB_REPO.to_string();
         }
         if self.stake_presets.is_empty() {
@@ -769,5 +910,32 @@ mod tests {
         assert!(!base.join("polydirect.migrating").exists());
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn auto_apply_opt_in_persists_while_legacy_true_is_migrated() {
+        let dir = std::env::temp_dir().join(format!("polydirect-optin-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        let mut legacy = AppConfig {
+            auto_apply_hot_updates: true,
+            auto_apply_hot_updates_opt_in: None,
+            ..AppConfig::default()
+        };
+        legacy.sanitize();
+        assert!(!legacy.auto_apply_hot_updates);
+
+        let opted = AppConfig {
+            auto_apply_hot_updates: true,
+            auto_apply_hot_updates_opt_in: Some(true),
+            ..AppConfig::default()
+        };
+        opted.save(Some(&path)).unwrap();
+        let reloaded = AppConfig::load(Some(&path)).unwrap();
+        assert!(reloaded.auto_apply_hot_updates);
+        assert_eq!(reloaded.auto_apply_hot_updates_opt_in, Some(true));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

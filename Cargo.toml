@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "polydesk"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 rust-version = "1.95.0"
 description = "Native GPU ultra-low-latency Polymarket CLOB V2 trading terminal (Linux, Windows 10/11, macOS, and iOS/iPadOS via Rust FFI)"
@@ -55,6 +55,8 @@ argon2 = "0.5"
 rand = "0.8"
 sha2 = "0.10"
 hex = "0.4"
+# Detached secp256k1 signatures over release SHA256SUMS.txt (same curve alloy already ships)
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
 base64 = "0.22"
 zeroize = "1.8"
 
@@ -76,3 +78,10 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+
+[profile.fast]
+inherits = "release"
+opt-level = 2
+lto = false
+codegen-units = 16
+strip = false

@@ -6,23 +6,19 @@ struct OracleStripView: View {
     @ObservedObject var engine: EngineBridge
     @Environment(\.colorScheme) private var scheme
 
-    private var muted: Color {
-        scheme == .light ? Color.black.opacity(0.55) : Color.white.opacity(0.55)
-    }
-    private var amber: Color {
-        Color(red: 0.98, green: 0.75, blue: 0.25)
-    }
-
     private func spotColor(_ f: ShortFrame) -> Color {
-        if f.stale == true { return muted }
+        if f.stale == true { return PolyTheme.textMuted(scheme) }
         guard let beat = f.beat, let spot = f.spot else { return .primary }
-        return spot >= beat ? .green : .red
+        return spot >= beat ? PolyTheme.emerald(scheme) : PolyTheme.crimson(scheme)
     }
 
     var body: some View {
         Group {
             if let f = engine.shortFrame, f.active {
-                VStack(alignment: .leading, spacing: 3) {
+                let muted = PolyTheme.textMuted(scheme)
+                let amber = PolyTheme.amber(scheme)
+                let stale = f.stale == true
+                VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 8) {
                         Text((f.symbol ?? "").uppercased())
                             .font(.caption2.monospaced().bold())
@@ -33,47 +29,82 @@ struct OracleStripView: View {
                         if let beat = f.beat, let spot = f.spot {
                             let diff = spot - beat
                             let pct = beat != 0 ? diff / beat * 100.0 : 0.0
+                            let dCol = stale ? muted : (diff >= 0 ? PolyTheme.emeraldText(scheme) : PolyTheme.crimsonText(scheme))
+                            let dBg = stale ? PolyTheme.subBg(scheme) : (diff >= 0 ? PolyTheme.emerald(scheme) : PolyTheme.crimson(scheme)).opacity(0.16)
                             Text(String(format: "%+.2f (%+.2f%%)", diff, pct))
-                                .font(.caption.monospacedDigit().bold())
-                                .foregroundColor(f.stale == true ? muted : (diff >= 0 ? .green : .red))
+                                .font(.caption2.monospacedDigit().bold())
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(dBg)
+                                .foregroundColor(dCol)
+                                .cornerRadius(4)
                         }
                         if let m = engine.activeMarket {
                             let idx = engine.activeOutcomeIdx < m.outcomes.count ? engine.activeOutcomeIdx : 0
                             let staticPx = idx < m.outcome_prices.count ? m.outcome_prices[idx] : nil
                             let px = engine.book?.mid ?? engine.book?.best_ask ?? staticPx
-                            Text("· \(m.displayOutcome(idx, zh: engine.zh)) \(engine.oddsFmt.format(px, tick: m.tick_size))")
-                                .font(.caption.monospacedDigit())
-                                .foregroundColor(muted)
+                            Text("\(m.displayOutcome(idx, zh: engine.zh)) \(engine.oddsFmt.format(px, tick: m.tick_size))")
+                                .font(.caption2.monospacedDigit().bold())
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(PolyTheme.subBg(scheme))
+                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(PolyTheme.border(scheme), lineWidth: 1))
+                                .foregroundColor(.secondary)
                                 .lineLimit(1)
                         }
                         Spacer(minLength: 4)
                         if let secs = f.secs_left {
-                            Text(String(format: "%02d:%02d", secs / 60, secs % 60))
-                                .font(.caption.monospacedDigit().bold())
-                                .foregroundColor(secs <= 30 ? .red : (secs <= 60 ? amber : .primary))
+                            let total = Double(max(1, f.interval_mins ?? 5) * 60)
+                            let frac = max(0.0, min(1.0, 1.0 - Double(secs) / total))
+                            let tCol: Color = secs <= 30 ? PolyTheme.crimson(scheme) : (secs <= 60 ? amber : .primary)
+                            VStack(alignment: .trailing, spacing: 2) {
+                                Text(String(format: "%02d:%02d", secs / 60, secs % 60))
+                                    .font(.caption.monospacedDigit().bold())
+                                    .foregroundColor(tCol)
+                                GeometryReader { g in
+                                    ZStack(alignment: .leading) {
+                                        Capsule().fill(PolyTheme.chipBg(scheme))
+                                        Capsule().fill(tCol).frame(width: g.size.width * frac)
+                                    }
+                                }
+                                .frame(width: 42, height: 3)
+                            }
                         }
-                        Button(engine.t("Next Round", "下一轮")) { engine.advanceNextRound() }
+                        Button(engine.t("Next →", "下轮 →")) { engine.advanceNextRound() }
                             .font(.caption2.bold())
                             .buttonStyle(.bordered)
                     }
                     ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 10) {
+                        HStack(spacing: 14) {
                             if let beat = f.beat {
-                                Text("\(engine.t("Price to Beat", "目标基准价")) \(EngineBridge.formatOracleUsd(beat))")
-                                    .font(.caption2.monospacedDigit().bold())
-                                    .foregroundColor(amber)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(engine.t("PRICE TO BEAT", "目标基准价"))
+                                        .font(.system(size: 9, weight: .semibold))
+                                        .foregroundColor(muted)
+                                    Text(EngineBridge.formatOracleUsd(beat))
+                                        .font(.caption2.monospacedDigit().bold())
+                                        .foregroundColor(amber)
+                                }
                             }
                             if let twap = f.twap_60s {
-                                Text("60s TWAP \(EngineBridge.formatOracleUsd(twap))")
-                                    .font(.caption2.monospacedDigit())
-                                    .foregroundColor(.secondary)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("60s TWAP")
+                                        .font(.system(size: 9, weight: .semibold))
+                                        .foregroundColor(muted)
+                                    Text(EngineBridge.formatOracleUsd(twap))
+                                        .font(.caption2.monospacedDigit().bold())
+                                        .foregroundColor(stale ? muted : (f.beat.map { twap >= $0 ? PolyTheme.emeraldText(scheme) : PolyTheme.crimsonText(scheme) } ?? .primary))
+                                }
                             }
-                            if let bm = f.binance_mid {
-                                Text("Binance \(EngineBridge.formatOracleUsd(bm))")
-                                    .font(.caption2.monospacedDigit())
-                                    .foregroundColor(.secondary)
+                            if !stale, let bm = f.binance_mid {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("BINANCE")
+                                        .font(.system(size: 9, weight: .semibold))
+                                        .foregroundColor(muted)
+                                    Text(EngineBridge.formatOracleUsd(bm))
+                                        .font(.caption2.monospacedDigit())
+                                        .foregroundColor(.secondary)
+                                }
                             }
-                            if f.stale == true {
+                            if stale {
                                 Text(engine.t("STALE / RECONNECTING", "行情中断 / 重连中"))
                                     .font(.caption2.monospacedDigit())
                                     .foregroundColor(muted)
@@ -81,14 +112,14 @@ struct OracleStripView: View {
                         }
                     }
                 }
-                .padding(.horizontal, 9)
-                .padding(.vertical, 6)
-                .background(Color.gray.opacity(0.10))
+                .padding(.horizontal, 11)
+                .padding(.vertical, 8)
+                .background(PolyTheme.cardBg(scheme))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(Color.gray.opacity(0.35), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(PolyTheme.border(scheme), lineWidth: 1)
                 )
-                .cornerRadius(6)
+                .cornerRadius(8)
             }
         }
     }
@@ -101,10 +132,6 @@ struct Grid4UpView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var scheme
     @State private var interval: String = "5m"
-
-    private var muted: Color {
-        scheme == .light ? Color.black.opacity(0.55) : Color.white.opacity(0.55)
-    }
 
     var body: some View {
         NavigationStack {
@@ -132,6 +159,7 @@ struct Grid4UpView: View {
                     .padding(12)
                 }
             }
+            .background(PolyTheme.canvasBg(scheme))
             .navigationTitle(engine.t("5m / 15m 4-Up", "5m / 15m 四联分屏"))
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -154,6 +182,7 @@ struct Grid4UpView: View {
         let f = entry.oracle
         let cid = m.condition_id
         let up = engine.activeMarket?.condition_id == cid
+        let muted = PolyTheme.textMuted(scheme)
         return VStack(alignment: .leading, spacing: 6) {
             Text((f.coin ?? "").uppercased())
                 .font(.caption.bold().monospaced())
@@ -169,13 +198,13 @@ struct Grid4UpView: View {
                 if let secs = f.secs_left {
                     Text(String(format: "%02d:%02d", secs / 60, secs % 60))
                         .font(.caption2.monospacedDigit())
-                        .foregroundColor(secs <= 30 ? .red : muted)
+                        .foregroundColor(secs <= 30 ? PolyTheme.crimson(scheme) : muted)
                 }
             }
             if let beat = f.beat {
                 Text("\(engine.t("Beat", "基准")) \(EngineBridge.formatOracleUsd(beat))")
                     .font(.caption2.monospacedDigit())
-                    .foregroundColor(Color(red: 0.98, green: 0.75, blue: 0.25))
+                    .foregroundColor(PolyTheme.amber(scheme))
             }
             if let twap = f.twap_60s {
                 Text("TWAP \(EngineBridge.formatOracleUsd(twap))")
@@ -185,6 +214,7 @@ struct Grid4UpView: View {
             HStack(spacing: 6) {
                 ForEach(Array(m.outcomes.enumerated()), id: \.offset) { idx, _ in
                     let px: Double? = idx < m.outcome_prices.count ? m.outcome_prices[idx] : nil
+                    let oc = idx == 0 ? PolyTheme.emerald(scheme) : PolyTheme.crimson(scheme)
                     Button {
                         engine.selectMarket(m, outcomeIdx: idx)
                         dismiss()
@@ -192,26 +222,26 @@ struct Grid4UpView: View {
                         Text("\(m.displayOutcome(idx, zh: engine.zh)) \(engine.oddsFmt.format(px, tick: m.tick_size))")
                             .font(.caption2.monospacedDigit().bold())
                             .frame(maxWidth: .infinity)
-                            .padding(.vertical, 5)
-                            .background((idx == 0 ? Color.green : Color.red).opacity(0.18))
-                            .foregroundColor(idx == 0 ? .green : .red)
-                            .cornerRadius(5)
+                            .padding(.vertical, 6)
+                            .background(oc.opacity(0.16))
+                            .foregroundColor(oc)
+                            .cornerRadius(6)
                     }
                 }
             }
         }
-        .padding(9)
-        .background(up ? Color.blue.opacity(0.12) : Color.gray.opacity(0.08))
+        .padding(10)
+        .background(up ? PolyTheme.azure(scheme).opacity(0.12) : PolyTheme.cardBg(scheme))
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .stroke(up ? Color.blue : Color.gray.opacity(0.35), lineWidth: 1)
+                .stroke(up ? PolyTheme.azure(scheme) : PolyTheme.border(scheme), lineWidth: 1)
         )
         .cornerRadius(8)
     }
 
     private func colourFor(_ f: ShortFrame) -> Color {
-        if f.stale == true { return muted }
+        if f.stale == true { return PolyTheme.textMuted(scheme) }
         guard let beat = f.beat, let spot = f.spot else { return .primary }
-        return spot >= beat ? .green : .red
+        return spot >= beat ? PolyTheme.emerald(scheme) : PolyTheme.crimson(scheme)
     }
 }

@@ -13,6 +13,9 @@ pub struct Translator {
     http: Client,
     en_to_zh: DashMap<String, String>,
     zh_to_en: DashMap<String, String>,
+    /// Keys that were injected by a hot patch, so they can be unwound exactly.
+    hot_en_keys: DashMap<String, ()>,
+    hot_zh_keys: DashMap<String, ()>,
 }
 
 impl Translator {
@@ -21,7 +24,88 @@ impl Translator {
             http,
             en_to_zh: DashMap::new(),
             zh_to_en: DashMap::new(),
+            hot_en_keys: DashMap::new(),
+            hot_zh_keys: DashMap::new(),
         }
+    }
+
+    /// Apply verified hot-patch bilingual overrides immediately in memory (zero restart).
+    ///
+    /// SECURITY: outcome-bearing vocabulary (Yes/No/Up/Down/Over/Under/…) is owned by
+    /// the compiled glossary and can NEVER be overridden. Otherwise a one-line manifest
+    /// (`{"Up":"Down"}`) would relabel the two sides of a binary market and make the
+    /// user buy the opposite token.
+    pub fn apply_hot_overrides(
+        &self,
+        en_to_zh: &std::collections::HashMap<String, String>,
+        zh_to_en: &std::collections::HashMap<String, String>,
+    ) -> usize {
+        let mut applied = 0usize;
+        for (en, zh) in en_to_zh {
+            let k = en.trim();
+            let v = zh.trim();
+            if k.is_empty() || v.is_empty() || Self::is_reserved_label(k) {
+                continue;
+            }
+            self.en_to_zh.insert(k.to_string(), v.to_string());
+            self.hot_en_keys.insert(k.to_string(), ());
+            applied += 1;
+        }
+        for (zh, en) in zh_to_en {
+            let k = zh.trim();
+            let v = en.trim();
+            if k.is_empty() || v.is_empty() || Self::is_reserved_label(k) {
+                continue;
+            }
+            self.zh_to_en.insert(k.to_string(), v.to_string());
+            self.hot_zh_keys.insert(k.to_string(), ());
+            applied += 1;
+        }
+        applied
+    }
+
+    /// True for strings whose meaning is a trading outcome. Hot patches may not touch
+    /// these; the compiled glossary is the single source of truth.
+    fn is_reserved_label(s: &str) -> bool {
+        if outcome_glossary_zh(s).is_some() {
+            return true;
+        }
+        matches!(
+            s.trim().to_ascii_lowercase().as_str(),
+            "buy" | "sell" | "long" | "short" | "bid" | "ask" | "win" | "lose" | "winning"
+        )
+    }
+
+    /// Remove every override injected by a hot patch, restoring the pre-patch cache.
+    pub fn clear_hot_overrides(&self) {
+        let en_keys: Vec<String> = self.hot_en_keys.iter().map(|e| e.key().clone()).collect();
+        for k in en_keys {
+            self.en_to_zh.remove(&k);
+        }
+        self.hot_en_keys.clear();
+        let zh_keys: Vec<String> = self.hot_zh_keys.iter().map(|e| e.key().clone()).collect();
+        for k in zh_keys {
+            self.zh_to_en.remove(&k);
+        }
+        self.hot_zh_keys.clear();
+    }
+
+    pub fn hot_override_count(&self) -> usize {
+        self.hot_en_keys.len() + self.hot_zh_keys.len()
+    }
+
+    /// Outcome-name translation with the compiled glossary taking priority over every
+    /// cache entry, including anything a hot patch injected. Used for YES/NO, Up/Down,
+    /// Over/Under and other labels whose inversion would change the traded token.
+    pub fn get_zh_outcome(&self, text: &str) -> Option<String> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if let Some(exact) = outcome_glossary_zh(trimmed) {
+            return Some(exact.to_string());
+        }
+        self.get_zh(trimmed)
     }
 
     /// Lock-free O(1) lookup for UI rendering (never blocks the frame loop).
@@ -33,10 +117,13 @@ impl Translator {
         if contains_cjk(trimmed) {
             return Some(trimmed.to_string());
         }
+        if let Some(ov) = self.en_to_zh.get(trimmed) {
+            return Some(ov.value().clone());
+        }
         if let Some(exact) = outcome_glossary_zh(trimmed) {
             return Some(exact.to_string());
         }
-        self.en_to_zh.get(trimmed).map(|v| v.value().clone())
+        None
     }
 
     /// Translate a batch of English market titles / outcomes / sibling titles to Simplified Chinese.
@@ -391,5 +478,58 @@ mod tests {
         let hits = expand_cn_glossary("美联储 降息");
         assert!(hits.iter().any(|h| h.contains("fed")));
         assert!(hits.iter().any(|h| h.contains("interest rates")));
+    }
+
+    // ---- §4.12: a hot patch must never be able to invert an outcome label ---------
+
+    #[test]
+    fn hot_overrides_cannot_relabel_trading_outcomes() {
+        let tr = Translator::new(Client::new());
+        let applied = tr.apply_hot_overrides(
+            &std::collections::HashMap::from([
+                ("Up".to_string(), "Down".to_string()),
+                ("Yes".to_string(), "No".to_string()),
+                ("No".to_string(), "Yes".to_string()),
+                ("Buy".to_string(), "Sell".to_string()),
+                ("Long".to_string(), "Short".to_string()),
+            ]),
+            &std::collections::HashMap::new(),
+        );
+        assert_eq!(applied, 0, "reserved outcome labels must be ignored");
+        assert_eq!(tr.get_zh("Up").as_deref(), Some("涨"));
+        assert_eq!(tr.get_zh("Yes").as_deref(), Some("是"));
+        assert_eq!(tr.get_zh("No").as_deref(), Some("否"));
+        assert_eq!(tr.get_zh_outcome("Up").as_deref(), Some("涨"));
+
+        // A legitimate (non-outcome) override still applies and is reversible.
+        let applied = tr.apply_hot_overrides(
+            &std::collections::HashMap::from([(
+                "Will BTC close above 100k?".to_string(),
+                "BTC 会收于 10 万以上吗？".to_string(),
+            )]),
+            &std::collections::HashMap::new(),
+        );
+        assert_eq!(applied, 1);
+        assert_eq!(
+            tr.get_zh("Will BTC close above 100k?").as_deref(),
+            Some("BTC 会收于 10 万以上吗？")
+        );
+        assert_eq!(tr.hot_override_count(), 1);
+
+        // Clearing restores the ambient cache exactly.
+        tr.clear_hot_overrides();
+        assert_eq!(tr.hot_override_count(), 0);
+        assert!(tr.get_zh("Will BTC close above 100k?").is_none());
+        assert_eq!(tr.get_zh("Up").as_deref(), Some("涨"));
+    }
+
+    #[test]
+    fn outcome_lookup_beats_any_cached_translation() {
+        let tr = Translator::new(Client::new());
+        // Even if something wrote a wrong entry straight into the cache, the
+        // outcome-safe lookup must win.
+        tr.en_to_zh.insert("Down".into(), "涨".into());
+        assert_eq!(tr.get_zh("Down").as_deref(), Some("涨"));
+        assert_eq!(tr.get_zh_outcome("Down").as_deref(), Some("跌"));
     }
 }

@@ -48,6 +48,7 @@ pub const MAX_INACTIVE_BOOKS: usize = 64;
 enum FeedCmd {
     Subscribe(Vec<String>),
     Unsubscribe(Vec<String>),
+    SetWsUrl(String),
 }
 
 pub struct MarketFeed {
@@ -284,11 +285,18 @@ impl MarketFeed {
     pub fn subscribe_events(&self) -> broadcast::Receiver<FeedEvent> {
         self.events_tx.subscribe()
     }
+
+    pub fn update_ws_url(&self, new_url: String) {
+        let trimmed = new_url.trim().to_string();
+        if trimmed.starts_with("wss://") {
+            let _ = self.cmd_tx.send(FeedCmd::SetWsUrl(trimmed));
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn run_ws_loop(
-    ws_url: String,
+    mut ws_url: String,
     books: Arc<DashMap<String, FastOrderBook>>,
     tape: Arc<Mutex<VecDeque<TapeEntry>>>,
     subscribed: Arc<Mutex<HashSet<String>>>,
@@ -297,14 +305,15 @@ async fn run_ws_loop(
     telemetry: Arc<Telemetry>,
     whale_threshold: Arc<Mutex<f64>>,
 ) {
-    let mut backoff_ms = 250u64;
+    let mut backoff_ms = 150u64;
 
     loop {
+        let mut reconnect_now = false;
         // Connect with disable_nagle = true (TCP_NODELAY) for minimum packet latency
         match connect_async_with_config(&ws_url, None, true).await {
             Ok((ws_stream, _)) => {
                 info!(url = %ws_url, "Connected to Polymarket CLOB market WebSocket (TCP_NODELAY)");
-                backoff_ms = 250;
+                backoff_ms = 150;
                 telemetry.set_ws_connected(true);
                 let _ = events_tx.send(FeedEvent::Status { ws_connected: true });
 
@@ -380,6 +389,15 @@ async fn run_ws_loop(
                                     });
                                     let _ = write.send(Message::Text(payload.to_string().into())).await;
                                 }
+                                Some(FeedCmd::SetWsUrl(new_url)) => {
+                                    if new_url != ws_url {
+                                        info!(old = %ws_url, new = %new_url, "Hot-reloading Polymarket market WebSocket URL");
+                                        ws_url = new_url;
+                                        backoff_ms = 150;
+                                        reconnect_now = true;
+                                        break;
+                                    }
+                                }
                                 None => return,
                             }
                         }
@@ -400,6 +418,9 @@ async fn run_ws_loop(
         telemetry.set_ws_connected(false);
         telemetry.inc_ws_reconnect();
         let _ = events_tx.send(FeedEvent::Status { ws_connected: false });
+        if reconnect_now {
+            continue;
+        }
         tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
         backoff_ms = (backoff_ms * 2).min(5_000);
     }
@@ -491,7 +512,7 @@ fn process_single_event(
                 .entry(asset_id.to_string())
                 .or_insert_with(|| FastOrderBook::new(asset_id.to_string(), market_id.to_string(), 0.01));
             book.apply_snapshot(&bids, &asks, ts_ms, hash);
-            let view = book.to_view(60);
+            let view = book.to_top_view();
             let _ = events_tx.send(FeedEvent::Book { view });
         }
         "price_change" => {
@@ -521,7 +542,7 @@ fn process_single_event(
             for asset_id in touched {
                 if let Some(book) = books.get(&asset_id) {
                     let _ = events_tx.send(FeedEvent::Book {
-                        view: book.to_view(60),
+                        view: book.to_top_view(),
                     });
                 }
             }
@@ -544,7 +565,7 @@ fn process_single_event(
             if let Some(mut book) = books.get_mut(asset_id) {
                 book.last_trade_price = Some(price);
                 book.last_trade_side = Some(side.clone());
-                let view = book.to_view(60);
+                let view = book.to_top_view();
                 let _ = events_tx.send(FeedEvent::Book { view });
             }
 
@@ -576,7 +597,7 @@ fn process_single_event(
             {
                 book.set_tick_size(new_tick);
                 let _ = events_tx.send(FeedEvent::Book {
-                    view: book.to_view(60),
+                    view: book.to_top_view(),
                 });
             }
         }

@@ -1,6 +1,8 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use parking_lot::RwLock;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -261,11 +263,16 @@ pub struct WhaleFlowSummary {
 }
 
 #[derive(Clone)]
-pub struct MarketClient {
-    http: Client,
+struct MarketHosts {
     gamma_host: String,
     clob_host: String,
     data_host: String,
+}
+
+#[derive(Clone)]
+pub struct MarketClient {
+    http: Client,
+    hosts: Arc<RwLock<MarketHosts>>,
 }
 
 impl MarketClient {
@@ -285,10 +292,46 @@ impl MarketClient {
 
         Ok(Self {
             http,
-            gamma_host: gamma_host.trim_end_matches('/').to_string(),
-            clob_host: clob_host.trim_end_matches('/').to_string(),
-            data_host: data_host.trim_end_matches('/').to_string(),
+            hosts: Arc::new(RwLock::new(MarketHosts {
+                gamma_host: gamma_host.trim_end_matches('/').to_string(),
+                clob_host: clob_host.trim_end_matches('/').to_string(),
+                data_host: data_host.trim_end_matches('/').to_string(),
+            })),
         })
+    }
+
+    pub fn update_hosts(&self, gamma: Option<&str>, clob: Option<&str>, data: Option<&str>) {
+        let mut h = self.hosts.write();
+        if let Some(g) = gamma {
+            let clean = g.trim().trim_end_matches('/');
+            if clean.starts_with("https://") {
+                h.gamma_host = clean.to_string();
+            }
+        }
+        if let Some(c) = clob {
+            let clean = c.trim().trim_end_matches('/');
+            if clean.starts_with("https://") {
+                h.clob_host = clean.to_string();
+            }
+        }
+        if let Some(d) = data {
+            let clean = d.trim().trim_end_matches('/');
+            if clean.starts_with("https://") {
+                h.data_host = clean.to_string();
+            }
+        }
+    }
+
+    fn gamma_host(&self) -> String {
+        self.hosts.read().gamma_host.clone()
+    }
+
+    fn clob_host(&self) -> String {
+        self.hosts.read().clob_host.clone()
+    }
+
+    fn data_host(&self) -> String {
+        self.hosts.read().data_host.clone()
     }
 
     pub fn http(&self) -> &Client {
@@ -358,7 +401,7 @@ impl MarketClient {
 
         let url = format!(
             "{}/markets?active=true&closed=false&limit={}&offset={}&order=volume24hr&ascending=false",
-            self.gamma_host, fetch_limit, offset
+            self.gamma_host(), fetch_limit, offset
         );
 
         let raw: Vec<Value> = self
@@ -404,7 +447,7 @@ impl MarketClient {
             for term in gamma_terms {
                 let search_url = format!(
                     "{}/public-search?q={}&events_status=active",
-                    self.gamma_host,
+                    self.gamma_host(),
                     urlencoding_simple(&term.to_lowercase())
                 );
                 if let Ok(resp) = self.http.get(&search_url).send().await
@@ -485,7 +528,7 @@ impl MarketClient {
     }
 
     pub async fn fetch_market_by_slug(&self, slug: &str) -> Result<Option<MarketSummary>> {
-        let url = format!("{}/events?slug={}", self.gamma_host, urlencoding_simple(slug));
+        let url = format!("{}/events?slug={}", self.gamma_host(), urlencoding_simple(slug));
         let events: Vec<Value> = self
             .http
             .get(&url)
@@ -523,7 +566,7 @@ impl MarketClient {
         for tag in tags {
             let url = format!(
                 "{}/events?active=true&closed=false&tag_slug={}&end_date_min={}&order=endDate&ascending=true&limit={}",
-                self.gamma_host,
+                self.gamma_host(),
                 urlencoding_simple(tag),
                 urlencoding_simple(&now_iso),
                 limit.clamp(8, 50)
@@ -635,7 +678,7 @@ impl MarketClient {
     pub async fn fetch_event_siblings(&self, event_slug: &str) -> Result<EventSiblings> {
         let url = format!(
             "{}/events?slug={}",
-            self.gamma_host,
+            self.gamma_host(),
             urlencoding_simple(event_slug)
         );
         let events: Vec<Value> = self
@@ -717,7 +760,7 @@ impl MarketClient {
     }
 
     pub async fn fetch_book_rest(&self, token_id: &str) -> Result<(Vec<(f64, f64)>, Vec<(f64, f64)>, f64, Option<f64>, i64, Option<String>)> {
-        let url = format!("{}/book?token_id={}", self.clob_host, token_id);
+        let url = format!("{}/book?token_id={}", self.clob_host(), token_id);
         let v: Value = self
             .http
             .get(&url)
@@ -763,23 +806,10 @@ impl MarketClient {
         Ok((bids, asks, tick_size, last_trade, ts, hash))
     }
 
-    pub async fn fetch_price_history(
-        &self,
-        token_id: &str,
-        interval: &str,
-        fidelity: u32,
-    ) -> Result<Vec<PricePoint>> {
-        let interval_clean = match interval {
-            "1h" | "6h" | "1d" | "1w" | "1m" | "max" => interval,
-            _ => "1d",
-        };
-        let url = format!(
-            "{}/prices-history?market={}&interval={}&fidelity={}",
-            self.clob_host, token_id, interval_clean, fidelity
-        );
+    async fn fetch_price_history_url(&self, url: &str) -> Result<Vec<PricePoint>> {
         let v: Value = self
             .http
-            .get(&url)
+            .get(url)
             .send()
             .await?
             .error_for_status()?
@@ -800,19 +830,55 @@ impl MarketClient {
         Ok(pts)
     }
 
+    pub async fn fetch_price_history(
+        &self,
+        token_id: &str,
+        interval: &str,
+        fidelity: u32,
+    ) -> Result<Vec<PricePoint>> {
+        let interval_clean = match interval {
+            "1h" | "6h" | "1d" | "1w" | "1m" | "max" => interval,
+            _ => "1d",
+        };
+        let url = format!(
+            "{}/prices-history?market={}&interval={}&fidelity={}",
+            self.clob_host(), token_id, interval_clean, fidelity
+        );
+        self.fetch_price_history_url(&url).await
+    }
+
+    /// Fetch granular price history starting from a specific Unix timestamp (`startTs`),
+    /// which returns active intra-slot ticks on 5m/15m markets where `interval=1h` lags.
+    pub async fn fetch_price_history_since(
+        &self,
+        token_id: &str,
+        start_ts: i64,
+        fidelity: u32,
+    ) -> Result<Vec<PricePoint>> {
+        let url = format!(
+            "{}/prices-history?market={}&startTs={}&fidelity={}",
+            self.clob_host(),
+            token_id,
+            start_ts.max(0),
+            fidelity.max(1)
+        );
+        self.fetch_price_history_url(&url).await
+    }
+
     /// Fetch top holders & recent whale trades via Polymarket Data API v2.
     pub async fn fetch_whale_flow(
         &self,
         condition_id: &str,
         whale_threshold_usd: f64,
     ) -> Result<WhaleFlowSummary> {
+        let data_host = self.data_host();
         let holders_url = format!(
             "{}/v2/holders?condition={}&limit=20",
-            self.data_host, condition_id
+            data_host, condition_id
         );
         let trades_url = format!(
             "{}/v2/trades?condition={}&limit=60",
-            self.data_host, condition_id
+            data_host, condition_id
         );
 
         let (holders_res, trades_res) = tokio::join!(
@@ -905,7 +971,7 @@ impl MarketClient {
     pub async fn fetch_wallet_trades(&self, wallet: &str, limit: usize) -> Result<Vec<WhaleTrade>> {
         let url = format!(
             "{}/v2/trades?user={}&limit={}",
-            self.data_host,
+            self.data_host(),
             wallet.trim(),
             limit.clamp(1, 50)
         );
@@ -931,7 +997,7 @@ impl MarketClient {
 
     /// Fetch live positions for an authenticated wallet from Data API v2.
     pub async fn fetch_wallet_positions(&self, wallet: &str) -> Result<Vec<Value>> {
-        let url = format!("{}/v2/positions?user={}&limit=100", self.data_host, wallet);
+        let url = format!("{}/v2/positions?user={}&limit=100", self.data_host(), wallet);
         let val: Value = self
             .http
             .get(&url)
@@ -1304,7 +1370,7 @@ async fn populate_market_translations(
         m.outcomes_zh = m
             .outcomes
             .iter()
-            .map(|o| translator.get_zh(o).unwrap_or_else(|| o.clone()))
+            .map(|o| translator.get_zh_outcome(o).unwrap_or_else(|| o.clone()))
             .collect();
     }
 }

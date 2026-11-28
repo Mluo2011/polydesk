@@ -1,0 +1,130 @@
+name: Publish Hot Update Manifest (Zero-Restart Channel)
+
+on:
+  push:
+    tags:
+      # Exact tag only. `hot-patch*` also matched `hot-patch-test`, `hot-patch-backup`
+      # and stale re-pushes, each of which would republish the production channel.
+      - "hot-patch"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish-hot-patch:
+    name: Validate & Publish hot-patch.json
+    runs-on: ubuntu-latest
+    # Requires a protected environment with required reviewers. Any client still
+    # running with the legacy `auto_apply_hot_updates = true` picks this up within
+    # 30 minutes, so publishing is a production change.
+    environment: production
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate packaging/hot-patch.json
+        run: |
+          python3 - <<'PY'
+          import json
+          from urllib.parse import urlparse
+          with open("packaging/hot-patch.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+          assert data.get("schema_version") == 1, "schema_version must be 1"
+          assert isinstance(data.get("patch_id"), str) and data["patch_id"].strip(), "patch_id required"
+          assert isinstance(data.get("revision"), int) and data["revision"] >= 1, "revision >= 1 required"
+          assert isinstance(data.get("min_app_version"), str) and data["min_app_version"].strip(), "min_app_version required"
+          eps = data.get("endpoints") or {}
+          if isinstance(eps, dict) and eps.get("clob_host"):
+              host = urlparse(eps["clob_host"]).hostname or ""
+              assert host == "clob.polymarket.com", (
+                  f"clob_host may not be redirected (got {host!r}) — order routing is not remotely configurable"
+              )
+          ann = data.get("announcement") or {}
+          if isinstance(ann, dict) and ann.get("url"):
+              host = (urlparse(ann["url"]).hostname or "").lower()
+              allowed = ("appdeck.org", "polymarket.com", "github.com")
+              assert any(host == a or host.endswith("." + a) for a in allowed), (
+                  f"announcement url host {host!r} is not allowlisted"
+              )
+          print(f"Validated hot-patch manifest: id={data['patch_id']} rev={data['revision']} min={data['min_app_version']}")
+          PY
+
+      - name: Refuse to roll the channel backwards
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          new_rev=$(python3 -c 'import json;print(json.load(open("packaging/hot-patch.json"))["revision"])')
+          cur_rev=0
+          url=$(gh api "repos/${{ github.repository }}/releases/tags/hot-patch" \
+                  --jq '.assets[] | select(.name=="hot-patch.json") | .browser_download_url' 2>/dev/null \
+                | head -n1 || true)
+          if [ -n "$url" ]; then
+            cur_rev=$(curl -fsSL "$url" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("revision",0))' 2>/dev/null || echo 0)
+          fi
+          echo "current published revision: $cur_rev; new revision: $new_rev"
+          if [ "$cur_rev" -gt "$new_rev" ]; then
+            echo "::error::refusing to publish revision $new_rev below the live revision $cur_rev"
+            exit 1
+          fi
+
+      - name: Build SHA256SUMS.txt
+        run: |
+          mkdir -p hot-dist
+          cp packaging/hot-patch.json hot-dist/hot-patch.json
+          (cd hot-dist && sha256sum hot-patch.json > SHA256SUMS.txt && cat SHA256SUMS.txt)
+
+      - name: Detect signing key
+        id: signkey
+        env:
+          KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          if [ -n "${KEY:-}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::RELEASE_SIGNING_KEY is not set — publishing an UNSIGNED hot-patch channel"
+          fi
+
+      - name: Sign SHA256SUMS.txt
+        if: steps.signkey.outputs.present == 'true'
+        working-directory: hot-dist
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$RELEASE_SIGNING_KEY" > "$RUNNER_TEMP/release-signing-key.pem"
+          # secp256k1 ECDSA/SHA-256 over the exact checksum bytes. The client accepts
+          # DER or 64-byte r||s, hex or base64 (updater::verify_manifest_signature).
+          openssl dgst -sha256 -sign "$RUNNER_TEMP/release-signing-key.pem" \
+            -out "$RUNNER_TEMP/SHA256SUMS.txt.der" SHA256SUMS.txt
+          base64 -w0 "$RUNNER_TEMP/SHA256SUMS.txt.der" > SHA256SUMS.txt.sig
+          rm -f "$RUNNER_TEMP/release-signing-key.pem" "$RUNNER_TEMP/SHA256SUMS.txt.der"
+
+      - name: Publish Rolling hot-patch Release (signed)
+        if: steps.signkey.outputs.present == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: hot-patch
+          name: PolyDirect Hot-Patch Channel
+          make_latest: false
+          generate_release_notes: false
+          body: "Detached-signed (secp256k1/SHA-256) rolling hot-patch channel for live translations, announcements, and allowlisted feed/API endpoints (no restart required)."
+          files: |
+            hot-dist/hot-patch.json
+            hot-dist/SHA256SUMS.txt
+            hot-dist/SHA256SUMS.txt.sig
+
+      - name: Publish Rolling hot-patch Release (unsigned)
+        if: steps.signkey.outputs.present != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: hot-patch
+          name: PolyDirect Hot-Patch Channel
+          make_latest: false
+          generate_release_notes: false
+          body: "UNSIGNED rolling hot-patch channel (no RELEASE_SIGNING_KEY configured)."
+          files: |
+            hot-dist/hot-patch.json
+            hot-dist/SHA256SUMS.txt

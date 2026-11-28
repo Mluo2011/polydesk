@@ -98,6 +98,28 @@ struct LadderView: View {
             let bidMap = aggregate(engine.book?.bids ?? [], step: step, floorMode: true)
             let askMap = aggregate(engine.book?.asks ?? [], step: step, floorMode: false)
             let maxDepth = max(10.0, (bidMap.values.max() ?? 0), (askMap.values.max() ?? 0))
+            let totBids = bidMap.values.reduce(0, +)
+            let totAsks = askMap.values.reduce(0, +)
+            let bidShare = (totBids + totAsks) > 1e-6 ? totBids / (totBids + totAsks) : 0.5
+            let bidPct = Int((bidShare * 100).rounded())
+
+            HStack(spacing: 6) {
+                Text("\(engine.t("BID", "买盘")) \(bidPct)%")
+                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                    .foregroundColor(PolyTheme.emeraldText(scheme))
+                GeometryReader { g in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(PolyTheme.crimson(scheme).opacity(0.35))
+                        Capsule().fill(PolyTheme.emerald(scheme)).frame(width: g.size.width * bidShare)
+                    }
+                }
+                .frame(height: 5)
+                Text("\(100 - bidPct)% \(engine.t("ASK", "卖盘"))")
+                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                    .foregroundColor(PolyTheme.crimsonText(scheme))
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
 
             ScrollView {
                 LazyVStack(spacing: 1) {
@@ -127,14 +149,14 @@ struct LadderView: View {
                                 } label: {
                                     ZStack(alignment: .trailing) {
                                         GeometryReader { g in
-                                            Rectangle()
-                                                .fill(Color.green.opacity(0.24))
+                                            RoundedRectangle(cornerRadius: 3)
+                                                .fill(PolyTheme.emerald(scheme).opacity(0.22))
                                                 .frame(width: g.size.width * min(1, bSz / maxDepth))
                                                 .frame(maxWidth: .infinity, alignment: .trailing)
                                         }
                                         Text(bSz > 0 ? fmtSz(bSz) : "")
                                             .font(.system(size: 11.5, design: .monospaced))
-                                            .foregroundColor(scheme == .light ? Color(red: 0.02, green: 0.47, blue: 0.34) : Color(red: 0.6, green: 0.97, blue: 0.84))
+                                            .foregroundColor(PolyTheme.emeraldText(scheme))
                                             .padding(.trailing, 5)
                                     }
                                     .frame(height: 32)
@@ -145,7 +167,7 @@ struct LadderView: View {
                                     .font(.system(size: 12, weight: .bold, design: .monospaced))
                                     .foregroundColor(.primary)
                                     .frame(width: 70, height: 32)
-                                    .background(scheme == .light ? Color(red: 0.945, green: 0.961, blue: 0.976) : Color(red: 0.07, green: 0.09, blue: 0.14))
+                                    .background(PolyTheme.subBg(scheme))
 
                                 // Ask Depth -> One-Tap SELL
                                 Button {
@@ -153,13 +175,13 @@ struct LadderView: View {
                                 } label: {
                                     ZStack(alignment: .leading) {
                                         GeometryReader { g in
-                                            Rectangle()
-                                                .fill(Color.red.opacity(0.24))
+                                            RoundedRectangle(cornerRadius: 3)
+                                                .fill(PolyTheme.crimson(scheme).opacity(0.22))
                                                 .frame(width: g.size.width * min(1, aSz / maxDepth))
                                         }
                                         Text(aSz > 0 ? fmtSz(aSz) : "")
                                             .font(.system(size: 11.5, design: .monospaced))
-                                            .foregroundColor(scheme == .light ? Color(red: 0.74, green: 0.07, blue: 0.24) : Color(red: 1.0, green: 0.68, blue: 0.75))
+                                            .foregroundColor(PolyTheme.crimsonText(scheme))
                                             .padding(.leading, 5)
                                     }
                                     .frame(height: 32)
@@ -197,7 +219,7 @@ struct LadderView: View {
             }
             .transaction { $0.animation = nil }
         }
-        .background(scheme == .light ? Color.white : Color(red: 0.04, green: 0.05, blue: 0.08))
+        .background(PolyTheme.panelBg(scheme))
         .onChange(of: engine.book?.mid) { newMid in
             guard let mid = newMid else { return }
             let step = max(0.001, engine.ladderStep)
